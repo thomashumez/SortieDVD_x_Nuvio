@@ -3,14 +3,12 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from .models import Movie
 from .utils import (
     dt_to_iso,
-    normalize_image_url,
     normalize_text,
     parse_int,
     parse_french_date,
@@ -186,30 +184,9 @@ class ParserMixin:
         return rating, voters
 
     def extract_poster(self, soup: BeautifulSoup, page_url: str) -> str:
-        og = soup.select_one('meta[property="og:image"]')
-        if og and og.get("content"):
-            return normalize_image_url(urljoin(page_url, og["content"]))
-
-        for img in soup.select("img[src]"):
-            src = img.get("src") or ""
-            alt = (img.get("alt") or "").lower()
-            lowered_src = src.lower()
-            if any(token in lowered_src for token in ("imdb-", "allocine", "favicon", "logo/")):
-                continue
-
-            width = parse_int(str(img.get("width") or "")) or 0
-            height = parse_int(str(img.get("height") or "")) or 0
-
-            if "img/affiches/" in lowered_src:
-                return normalize_image_url(urljoin(page_url, src))
-            if ("sortie" in alt or "affiche" in lowered_src) and (width >= 180 or height >= 260):
-                return normalize_image_url(urljoin(page_url, src))
-
-        fallback = soup.select_one("img[src]")
-        if fallback and fallback.get("src"):
-            return normalize_image_url(urljoin(page_url, fallback["src"]))
-
-        return "https://www.guide-rapide.com/IMG/divers/favicon.ico"
+        # Artwork is provider-owned. Guide-Rapide remains the source for
+        # release facts, but its page images must never become catalog posters.
+        return ""
 
     def extract_imdb_id(self, soup: BeautifulSoup) -> str:
         imdb_link = soup.select_one('a[href*="imdb.com/title/"]')
@@ -337,5 +314,8 @@ class ParserMixin:
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        self.apply_imdb_metadata(movie)
+        # Only exported physical movies need provider enrichment. This keeps
+        # the OMDb request budget focused on the catalog that will be published.
+        if movie.physical_available:
+            self.apply_imdb_metadata(movie)
         return movie

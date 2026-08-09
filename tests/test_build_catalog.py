@@ -6,11 +6,48 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
+
 from scripts import build_catalog
 from scripts.catalog import output as catalog_output
+from scripts.catalog.models import ImdbMetadata, Movie
 
 
 class BuildCatalogTests(unittest.TestCase):
+    def make_movie(self, poster: str = "") -> Movie:
+        return Movie(
+            id="tt1234567",
+            source_url="https://www.guide-rapide.com/film-1.html",
+            guide_rapide_id=1,
+            title="Source title",
+            year=2026,
+            director=["Source director"],
+            actors=["Source actor"],
+            runtime="1h30",
+            genres=["Drame"],
+            synopsis="Source synopsis",
+            rating="6.0",
+            voters=10,
+            poster=poster,
+            trailer_url="",
+            writers=[],
+            production_companies=[],
+            critic_ratings={},
+            content_rating="",
+            box_office="",
+            awards="",
+            metascore="",
+            imdb_id="tt1234567",
+            production_countries=["France"],
+            dvd_release_date="2026-08-01",
+            bluray_release_date="",
+            release_type="dvd",
+            release_text="DVD: 1 août 2026",
+            released="2026-08-01",
+            physical_available=True,
+            checked_at="2026-08-09T00:00:00+00:00",
+        )
+
     def test_invalid_runtime_configuration_fails_with_variable_name(self) -> None:
         with patch.dict(os.environ, {"GR_GUIDE_RAPIDE_TIMEOUT": "not-a-number"}):
             with self.assertRaisesRegex(ValueError, "GR_GUIDE_RAPIDE_TIMEOUT"):
@@ -61,6 +98,70 @@ class BuildCatalogTests(unittest.TestCase):
         parsed = build_catalog.parse_french_date("27 mai 2026")
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed.date().isoformat(), "2026-05-27")
+
+    def test_source_artwork_is_never_exported_as_movie_poster(self) -> None:
+        builder = build_catalog.GuideRapideBuilder()
+        try:
+            source_html = '<meta property="og:image" content="https://www.guide-rapide.com/IMG/affiches/poster.jpg">'
+            self.assertEqual(
+                builder.extract_poster(BeautifulSoup(source_html, "lxml"), "https://www.guide-rapide.com/film-1.html"),
+                "",
+            )
+
+            movie = self.make_movie(
+                poster="https://www.guide-rapide.com/IMG/affiches/poster.jpg"
+            )
+            self.assertEqual(builder.to_meta_preview(movie)["poster"], "")
+            full_meta = builder.to_meta(movie)
+            self.assertEqual(full_meta["poster"], "")
+            self.assertEqual(full_meta["background"], "")
+            self.assertEqual(full_meta["logo"], "")
+        finally:
+            builder.close()
+
+    def test_omdb_metadata_sets_provider_and_poster(self) -> None:
+        builder = build_catalog.GuideRapideBuilder()
+        try:
+            metadata = builder.omdb_payload_to_metadata(
+                {
+                    "Response": "True",
+                    "Title": "API title",
+                    "Year": "2025",
+                    "Director": "API director",
+                    "Actors": "API actor",
+                    "Runtime": "105 min",
+                    "Genre": "Drama",
+                    "Plot": "API synopsis",
+                    "imdbRating": "7.1",
+                    "imdbVotes": "1,234",
+                    "Poster": "https://m.media-amazon.com/images/poster.jpg",
+                }
+            )
+            self.assertEqual(metadata.provider, "omdb")
+            self.assertEqual(metadata.title, "API title")
+            self.assertEqual(metadata.poster, "https://m.media-amazon.com/images/poster.jpg")
+
+            movie = self.make_movie(
+                poster="https://www.guide-rapide.com/IMG/affiches/poster.jpg"
+            )
+            with patch.object(builder, "fetch_imdb_metadata", return_value=metadata):
+                self.assertTrue(builder.apply_imdb_metadata(movie))
+            self.assertEqual(movie.metadata_source, "omdb")
+            self.assertEqual(movie.title, "API title")
+            self.assertEqual(movie.poster, "https://m.media-amazon.com/images/poster.jpg")
+        finally:
+            builder.close()
+
+    def test_required_omdb_mode_requires_an_api_key(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="omdb",
+            require_omdb_metadata=True,
+            omdb_api_key="",
+            omdb_api_keys_raw="",
+        )
+        with self.assertRaisesRegex(RuntimeError, "GR_REQUIRE_OMDB_METADATA"):
+            build_catalog.GuideRapideBuilder(config=config)
 
     def test_publish_replaces_previous_site_as_a_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

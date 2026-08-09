@@ -9,7 +9,13 @@ from pathlib import Path
 
 from .config import OUTPUT_DIR, STATE_FILE
 from .models import Movie
-from .utils import atomic_write_text, read_json, subtract_months, write_json
+from .utils import (
+    atomic_write_text,
+    normalize_provider_image_url,
+    read_json,
+    subtract_months,
+    write_json,
+)
 
 class OutputMixin:
 
@@ -24,11 +30,12 @@ class OutputMixin:
         return " | ".join(parts)
 
     def to_meta_preview(self, movie: Movie) -> dict:
+        poster = normalize_provider_image_url(movie.poster)
         preview = {
             "id": movie.id,
             "type": "movie",
             "name": movie.title,
-            "poster": movie.poster,
+            "poster": poster,
             "releaseInfo": self.release_info_text(movie),
         }
         if movie.imdb_id:
@@ -44,6 +51,7 @@ class OutputMixin:
         return preview
 
     def to_meta(self, movie: Movie) -> dict:
+        poster = normalize_provider_image_url(movie.poster)
         description_parts = []
         if movie.synopsis:
             description_parts.append(movie.synopsis)
@@ -54,8 +62,8 @@ class OutputMixin:
             "id": movie.id,
             "type": "movie",
             "name": movie.title,
-            "poster": movie.poster,
-            "background": movie.poster,
+            "poster": poster,
+            "background": poster,
             "description": "\n\n".join(description_parts).strip(),
             "genres": movie.genres,
             "director": movie.director,
@@ -63,7 +71,7 @@ class OutputMixin:
             "releaseInfo": self.release_info_text(movie),
             "country": " / ".join(movie.production_countries) if movie.production_countries else "",
             "language": "fr",
-            "logo": movie.poster or "https://www.guide-rapide.com/IMG/divers/favicon.ico",
+            "logo": poster,
             "links": [{"name": "Guide-Rapide", "category": "source", "url": movie.source_url}],
         }
 
@@ -229,6 +237,21 @@ class OutputMixin:
                 raise RuntimeError(f"Generated metadata is missing or malformed: {movie.id}")
             if payload["meta"].get("id") != movie.id:
                 raise RuntimeError(f"Generated metadata id mismatch: {movie.id}")
+
+        if self.config.require_omdb_metadata:
+            missing = [
+                movie.id
+                for movie in movies
+                if movie.metadata_source != "omdb"
+                or not normalize_provider_image_url(movie.poster)
+            ]
+            if missing:
+                sample = ", ".join(missing[:10])
+                suffix = "..." if len(missing) > 10 else ""
+                raise RuntimeError(
+                    "OMDb metadata/poster coverage is incomplete: "
+                    f"{len(missing)}/{len(movies)} missing ({sample}{suffix})"
+                )
 
     def publish_output(self, staging_dir: Path) -> None:
         """Atomically replace the previous generated site after validation."""

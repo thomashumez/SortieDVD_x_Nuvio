@@ -17,10 +17,8 @@ The script discovers movie pages, parses physical release dates (DVD/Blu-ray), e
 1. Discover movie URLs from archive pages and RSS.
 2. Fetch and parse each movie page.
 3. Build a canonical movie id (`tt...` when available, otherwise `gr-film-...`).
-4. Enrich metadata with provider priority:
-   - OMDb API
-   - TMDB API
-   - optional IMDb fallback (disabled in production workflow)
+4. Enrich movie metadata and posters from OMDb in the production workflow.
+   Guide-Rapide remains the source for physical release facts and attribution only.
 5. Build output catalogs and per-movie meta JSON.
 6. Deploy `site/` via GitHub Pages workflow.
 
@@ -57,6 +55,7 @@ Important behavior:
 - Full metadata lives in `site/meta/movie/{id}.json`.
 - The site is generated in a temporary directory, validated, and published as a directory swap.
 - Cache and generated files use atomic writes; do not replace this with direct partial writes.
+- Guide-Rapide image URLs are never emitted as movie posters, backgrounds, or logos.
 
 ## Run Modes
 
@@ -74,6 +73,7 @@ Metadata backfill mode (`GR_METADATA_BACKFILL_MODE`):
 
 Provider / APIs:
 - `GR_METADATA_PROVIDER=auto|omdb|tmdb|imdb`
+- `GR_REQUIRE_OMDB_METADATA=true|false` (production workflow uses `true`)
 - `GR_OMDB_API_KEY`
 - `GR_OMDB_API_KEYS` (comma-separated fallback pool)
 - `GR_TMDB_API_KEY`
@@ -92,8 +92,9 @@ Caps and limits:
 
 ## Production Defaults (Current Workflow Intent)
 
-In GitHub Actions, production is API-first and avoids fragile IMDb fallbacks:
-- `GR_METADATA_PROVIDER=auto`
+In GitHub Actions, production requires OMDb metadata and posters:
+- `GR_METADATA_PROVIDER=omdb`
+- `GR_REQUIRE_OMDB_METADATA=true`
 - `GR_ENABLE_IMDB_SUGGESTION_FALLBACK=false`
 - `GR_ENABLE_IMDB_HTML_FALLBACK=false`
 

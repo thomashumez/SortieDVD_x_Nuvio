@@ -9,8 +9,9 @@ import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
-from .config import MONTHS
+from .config import GUIDE_RAPIDE_HOST_SUFFIX, MONTHS
 
 
 def normalize_text(value: str) -> str:
@@ -121,6 +122,17 @@ def normalize_image_url(url: str) -> str:
     if cleaned.startswith("http://guide-rapide.com/"):
         return "https://guide-rapide.com/" + cleaned.removeprefix("http://guide-rapide.com/")
     return cleaned
+
+def is_guide_rapide_url(url: str) -> bool:
+    host = (urlparse(normalize_text(url)).hostname or "").lower()
+    return host == GUIDE_RAPIDE_HOST_SUFFIX or host.endswith(f".{GUIDE_RAPIDE_HOST_SUFFIX}")
+
+def normalize_provider_image_url(url: str) -> str:
+    """Return an image URL only when it is not hosted by the source site."""
+    normalized = normalize_image_url(url)
+    if is_guide_rapide_url(normalized):
+        return ""
+    return normalized
 
 def subtract_months(src: date, months: int) -> date:
     month_index = src.month - 1 - months

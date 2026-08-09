@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from .config import IMDB_SUGGESTION_API, OMDB_API_URL, TMDB_API_URL
 from .models import ImdbMetadata
 from .utils import (
-    normalize_image_url,
+    normalize_provider_image_url,
     normalize_text,
     parse_int,
     split_list,
@@ -40,6 +40,7 @@ class MetadataMixin:
             box_office=primary.box_office or secondary.box_office,
             awards=primary.awards or secondary.awards,
             metascore=primary.metascore or secondary.metascore,
+            provider=primary.provider or secondary.provider,
         )
 
     def build_omdb_key_pool(self) -> list[str]:
@@ -298,6 +299,7 @@ class MetadataMixin:
             box_office="",
             awards="",
             metascore="",
+            provider="tmdb",
         )
 
     def omdb_payload_to_metadata(self, payload: dict) -> ImdbMetadata:
@@ -327,9 +329,7 @@ class MetadataMixin:
         if runtime == "N/A":
             runtime = ""
 
-        poster = normalize_image_url(str(payload.get("Poster") or "").strip())
-        if poster == "N/A":
-            poster = ""
+        poster = normalize_provider_image_url(str(payload.get("Poster") or "").strip())
 
         description = normalize_text(str(payload.get("Plot") or ""))
         if description == "N/A":
@@ -381,6 +381,7 @@ class MetadataMixin:
             box_office=box_office,
             awards=awards,
             metascore=metascore,
+            provider="omdb",
         )
 
     def lookup_imdb_id_via_omdb(self, title: str, year: Optional[int]) -> str:
@@ -622,14 +623,18 @@ class MetadataMixin:
                 cached_meta = ImdbMetadata(**cached)
                 if not allow_backfill:
                     return cached_meta
-                needs_tmdb_backfill = not normalize_text(cached_meta.trailer_url) or not cached_meta.production_companies
-                if not needs_tmdb_backfill:
-                    return cached_meta
+                if self.metadata_provider != "omdb" or cached_meta.provider == "omdb":
+                    needs_tmdb_backfill = (
+                        not normalize_text(cached_meta.trailer_url)
+                        or not cached_meta.production_companies
+                    )
+                    if not needs_tmdb_backfill:
+                        return cached_meta
 
-                tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
-                merged_cached = self.merge_metadata(cached_meta, tmdb_meta)
-                self.imdb_cache[imdb_id] = asdict(merged_cached)
-                return merged_cached
+                    tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
+                    merged_cached = self.merge_metadata(cached_meta, tmdb_meta)
+                    self.imdb_cache[imdb_id] = asdict(merged_cached)
+                    return merged_cached
             except TypeError:
                 pass
 
@@ -767,7 +772,7 @@ class MetadataMixin:
             year=year,
             director=list(dict.fromkeys(directors)) or None,
             actors=list(dict.fromkeys(actors)) or None,
-            poster=normalize_image_url(str(data.get("image") or "").strip()),
+            poster=normalize_provider_image_url(str(data.get("image") or "").strip()),
             description=normalize_text(str(data.get("description") or "")),
             genres=genres,
             rating=rating,
@@ -781,6 +786,7 @@ class MetadataMixin:
             box_office="",
             awards="",
             metascore="",
+            provider="imdb",
         )
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
@@ -801,6 +807,10 @@ class MetadataMixin:
         imdb = self.fetch_imdb_metadata(movie.imdb_id, allow_backfill=allow_network)
         changed = False
 
+        if imdb.provider and movie.metadata_source != imdb.provider:
+            movie.metadata_source = imdb.provider
+            changed = True
+
         if imdb.title and movie.title != imdb.title:
             movie.title = imdb.title
             changed = True
@@ -813,8 +823,9 @@ class MetadataMixin:
         if imdb.actors and movie.actors != imdb.actors:
             movie.actors = imdb.actors
             changed = True
-        if imdb.poster and movie.poster != imdb.poster:
-            movie.poster = imdb.poster
+        provider_poster = normalize_provider_image_url(imdb.poster)
+        if provider_poster and movie.poster != provider_poster:
+            movie.poster = provider_poster
             changed = True
         if imdb.description and movie.synopsis != imdb.description:
             movie.synopsis = imdb.description
@@ -876,6 +887,9 @@ class MetadataMixin:
         return not normalize_text(movie.trailer_url)
 
     def should_backfill_metadata(self, movie: Movie) -> bool:
+        if self.config.require_omdb_metadata and self.metadata_provider == "omdb":
+            return True
+
         if not movie.imdb_id:
             return False
 
@@ -907,7 +921,13 @@ class MetadataMixin:
                     continue
                 seen_ids.add(movie.id)
 
-                movie.poster = normalize_image_url(movie.poster)
+                if self.config.require_omdb_metadata and not movie.imdb_id:
+                    resolved_imdb_id = self.lookup_imdb_id_by_title(movie.title, movie.year)
+                    if resolved_imdb_id:
+                        movie.imdb_id = resolved_imdb_id
+                        movie.id = self.canonical_movie_id(movie.guide_rapide_id, resolved_imdb_id)
+
+                movie.poster = normalize_provider_image_url(movie.poster)
                 if not self.should_backfill_metadata(movie):
                     continue
 

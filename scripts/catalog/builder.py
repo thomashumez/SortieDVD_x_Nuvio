@@ -64,6 +64,16 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         self.metadata_backfill_mode = self.config.metadata_backfill_mode
         self.omdb_api_keys = self.build_omdb_key_pool()
 
+        if self.config.require_omdb_metadata:
+            if self.metadata_provider != "omdb":
+                raise ValueError(
+                    "GR_REQUIRE_OMDB_METADATA=true requires GR_METADATA_PROVIDER=omdb"
+                )
+            if not self.omdb_api_keys:
+                raise RuntimeError(
+                    "GR_REQUIRE_OMDB_METADATA=true requires GR_OMDB_API_KEY or GR_OMDB_API_KEYS"
+                )
+
     def close(self) -> None:
         self.session.close()
 
@@ -134,7 +144,19 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         log(f"[{self.elapsed()}] Discovered movie links: {len(discovered_urls)}")
         log(f"[{self.elapsed()}] Physical movies exported: {len(physical_movies)}")
         log(f"[{self.elapsed()}] Catalogs exported: {len(catalog_defs)}")
-        log(f"[{self.elapsed()}] Catalog posters refreshed from IMDb: {refreshed_posters}")
+        omdb_coverage = sum(
+            1
+            for movie in physical_movies
+            if movie.metadata_source == "omdb" and movie.poster
+        )
+        log(
+            f"[{self.elapsed()}] OMDb metadata/poster coverage: "
+            f"{omdb_coverage}/{len(physical_movies)}"
+        )
+        log(
+            f"[{self.elapsed()}] Catalog posters refreshed from metadata provider: "
+            f"{refreshed_posters}"
+        )
         log(
             f"[{self.elapsed()}] Metadata API lookups for poster/trailer backfill: "
             f"{metadata_api_lookups}"

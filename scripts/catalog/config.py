@@ -137,6 +137,7 @@ class BuildConfig:
     max_metadata_api_lookups_per_run: int
     metadata_provider: str
     metadata_backfill_mode: str
+    require_omdb_metadata: bool
     omdb_api_key: str
     omdb_api_keys_raw: str
     tmdb_api_key: str
@@ -169,6 +170,7 @@ class BuildConfig:
             metadata_backfill_mode=env_choice(
                 "GR_METADATA_BACKFILL_MODE", "smart", {"off", "smart", "deep"}
             ),
+            require_omdb_metadata=env_bool("GR_REQUIRE_OMDB_METADATA", False),
             omdb_api_key=os.getenv("GR_OMDB_API_KEY", "").strip(),
             omdb_api_keys_raw=os.getenv("GR_OMDB_API_KEYS", "").strip(),
             tmdb_api_key=os.getenv("GR_TMDB_API_KEY", "").strip(),

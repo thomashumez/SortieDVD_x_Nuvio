@@ -36,6 +36,7 @@ class Movie:
     released: str
     physical_available: bool
     checked_at: str
+    metadata_source: str = ""
 
 
 @dataclass
@@ -58,3 +59,4 @@ class ImdbMetadata:
     box_office: str = ""
     awards: str = ""
     metascore: str = ""
+    provider: str = ""

@@ -7,25 +7,23 @@ This repository builds a fully static Nuvio/Stremio-compatible addon from public
 - https://www.guide-rapide.com/accueil.html
 - https://www.guide-rapide.com/fluxrss.xml
 
-RSS is only used for discovery. DVD/Blu-ray release dates are parsed from movie pages.
+RSS is only used for discovery. DVD/Blu-ray release dates and the source link are parsed from movie pages.
 
-When Guide-Rapide fields are missing, the builder enriches metadata with this priority:
+Guide-Rapide is not used as a movie-artwork or metadata provider. The builder uses OMDb for movie metadata and posters:
 
-1. OMDb API (if `GR_OMDB_API_KEY` is set)
-2. TMDB API (if `GR_TMDB_API_KEY` is set)
-3. IMDb fallback (optional)
+1. OMDb API (required by the production workflow)
+2. Optional TMDB/IMDb behavior only when explicitly selected for local runs
 
-This is the most Nuvio-friendly setup because OMDb is IMDb-id centric (`tt...`) and returns stable movie metadata in one API call. TMDB adds robust API fallback without HTML parsing.
+OMDb is IMDb-id centric (`tt...`) and returns stable movie metadata and poster URLs in one API call. If OMDb cannot provide a poster, the production build fails validation instead of publishing a Guide-Rapide poster.
 
 Enrichment includes:
 
-- Poster fallback
-- Synopsis fallback
-- Rating / votes fallback
-- Runtime / genres fallback
-- Writers / production companies
-- Awards / metascore / content rating / box office
-- Critic ratings map (IMDb / Rotten Tomatoes / Metacritic when available)
+- OMDb poster
+- OMDb title, synopsis, rating, votes, runtime, genres, cast, and director
+- OMDb writers / production companies
+- OMDb awards / metascore / content rating / box office
+- OMDb critic ratings map when available
+- Guide-Rapide physical release dates and source attribution
 
 ## Output
 
@@ -69,10 +67,13 @@ Optional tuning for a bigger one-time backfill:
 GR_DISCOVERY_MODE=full GR_FULL_ARCHIVE_PAGES=5000 GR_FULL_MOVIE_FETCH_PER_RUN=5000 python scripts/build_catalog.py
 ```
 
-Optional API-first metadata mode (recommended for Nuvio):
+Strict OMDb metadata mode (used by GitHub Actions):
 
 ```bash
-GR_METADATA_PROVIDER=auto GR_OMDB_API_KEY=your_key_here GR_TMDB_API_KEY=your_key_here python scripts/build_catalog.py
+GR_METADATA_PROVIDER=omdb \
+GR_REQUIRE_OMDB_METADATA=true \
+GR_OMDB_API_KEY=your_key_here \
+python scripts/build_catalog.py
 ```
 
 Optional OMDb multi-key fallback (daily quota resilience):
@@ -89,10 +90,15 @@ Notes:
 
 Provider options:
 
-- `GR_METADATA_PROVIDER=auto` (default): try OMDb, then TMDB, then optional IMDb fallback
-- `GR_METADATA_PROVIDER=omdb`: force OMDb-first behavior
+- `GR_METADATA_PROVIDER=auto` (default): OMDb, then optional TMDB/IMDb behavior
+- `GR_METADATA_PROVIDER=omdb`: use OMDb only
 - `GR_METADATA_PROVIDER=tmdb`: force TMDB-only behavior
 - `GR_METADATA_PROVIDER=imdb`: disable OMDb and keep IMDb-only behavior
+
+Production metadata guard:
+
+- `GR_REQUIRE_OMDB_METADATA=true`: requires `GR_METADATA_PROVIDER=omdb`, an OMDb key, an OMDb record, and an OMDb poster for every exported movie; the build fails before publishing if coverage is incomplete.
+- Guide-Rapide image URLs are removed from cached records and are never emitted as movie posters, backgrounds, or logos.
 
 Metadata backfill mode:
 
@@ -202,7 +208,7 @@ Use a second GitHub Actions secret:
 3. Name: `TMDB_API_KEY`
 4. Value: your private TMDB API key
 
-The workflow reads `secrets.TMDB_API_KEY` to keep metadata resilient when OMDb has gaps.
+TMDB is not used by the production workflow, which runs in strict OMDb mode. Keep the TMDB secret only if you intentionally use a non-production local/provider configuration.
 
 Final manifest URL format:
 

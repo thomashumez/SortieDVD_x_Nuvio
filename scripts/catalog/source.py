@@ -31,6 +31,7 @@ from .utils import (
     parse_iso_date,
     parse_timestamp,
     read_json,
+    normalize_provider_image_url,
     subtract_months,
     write_json,
 )
@@ -278,6 +279,7 @@ class SourceMixin:
         payload.setdefault("box_office", "")
         payload.setdefault("awards", "")
         payload.setdefault("metascore", "")
+        payload["poster"] = normalize_provider_image_url(str(payload.get("poster") or ""))
 
         try:
             return Movie(**payload)
@@ -349,6 +351,7 @@ class SourceMixin:
             payload.setdefault("box_office", "")
             payload.setdefault("awards", "")
             payload.setdefault("metascore", "")
+            payload["poster"] = normalize_provider_image_url(str(payload.get("poster") or ""))
             try:
                 cached = Movie(**payload)
             except TypeError:
