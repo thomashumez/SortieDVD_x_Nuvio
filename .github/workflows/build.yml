@@ -154,6 +154,10 @@ jobs:
           GR_TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           GR_ENABLE_IMDB_SUGGESTION_FALLBACK: "false"
           GR_ENABLE_IMDB_HTML_FALLBACK: "false"
+          GR_GUIDE_RAPIDE_DELAY_SECONDS: "0.5"
+          GR_GUIDE_RAPIDE_TIMEOUT: "30"
+          GR_METADATA_API_DELAY_SECONDS: "0.1"
+          GR_METADATA_API_TIMEOUT: "20"
         run: python -u scripts/build_catalog.py
 
       - name: Setup Pages

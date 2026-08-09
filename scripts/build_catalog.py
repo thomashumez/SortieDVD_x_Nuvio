@@ -35,6 +35,20 @@ STATE_FILE = CACHE_DIR / "state.json"
 
 REQUEST_TIMEOUT = 30
 REQUEST_DELAY_SECONDS = 0.5
+GUIDE_RAPIDE_HOST_SUFFIX = "guide-rapide.com"
+METADATA_FAST_HOSTS = {
+    "www.omdbapi.com",
+    "omdbapi.com",
+    "api.themoviedb.org",
+    "www.themoviedb.org",
+    "v3.sg.media-imdb.com",
+    "www.imdb.com",
+    "imdb.com",
+}
+GUIDE_RAPIDE_REQUEST_TIMEOUT = int(os.getenv("GR_GUIDE_RAPIDE_TIMEOUT", str(REQUEST_TIMEOUT)))
+GUIDE_RAPIDE_DELAY_SECONDS = float(os.getenv("GR_GUIDE_RAPIDE_DELAY_SECONDS", str(REQUEST_DELAY_SECONDS)))
+METADATA_API_REQUEST_TIMEOUT = int(os.getenv("GR_METADATA_API_TIMEOUT", "20"))
+METADATA_API_DELAY_SECONDS = float(os.getenv("GR_METADATA_API_DELAY_SECONDS", "0.1"))
 DISCOVERY_MODE = os.getenv("GR_DISCOVERY_MODE", "auto").lower()
 FULL_ARCHIVE_PAGES = int(os.getenv("GR_FULL_ARCHIVE_PAGES", "4000"))
 INCREMENTAL_ARCHIVE_PAGES = int(os.getenv("GR_INCREMENTAL_ARCHIVE_PAGES", "150"))
@@ -277,7 +291,11 @@ class GuideRapideBuilder:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
-        self.last_request_ts = 0.0
+        self.last_request_ts_by_bucket = {
+            "guide_rapide": 0.0,
+            "metadata_api": 0.0,
+            "default": 0.0,
+        }
 
         self.state = read_json(STATE_FILE, default={"movies": {}, "last_run": ""})
         if not isinstance(self.state, dict):
@@ -298,17 +316,27 @@ class GuideRapideBuilder:
         mins, sec = divmod(seconds, 60)
         return f"{mins:02d}:{sec:02d}"
 
-    def throttle(self) -> None:
+    def request_profile(self, url: str) -> tuple[str, float, int]:
+        host = urlparse(url).netloc.lower()
+        if host.endswith(GUIDE_RAPIDE_HOST_SUFFIX):
+            return "guide_rapide", GUIDE_RAPIDE_DELAY_SECONDS, GUIDE_RAPIDE_REQUEST_TIMEOUT
+        if host in METADATA_FAST_HOSTS:
+            return "metadata_api", METADATA_API_DELAY_SECONDS, METADATA_API_REQUEST_TIMEOUT
+        return "default", REQUEST_DELAY_SECONDS, REQUEST_TIMEOUT
+
+    def throttle(self, bucket: str, delay_seconds: float) -> None:
         now = time.time()
-        wait_for = REQUEST_DELAY_SECONDS - (now - self.last_request_ts)
+        last_request_ts = self.last_request_ts_by_bucket.get(bucket, 0.0)
+        wait_for = delay_seconds - (now - last_request_ts)
         if wait_for > 0:
             time.sleep(wait_for)
 
     def fetch_url(self, url: str) -> Optional[str]:
-        self.throttle()
-        self.last_request_ts = time.time()
+        bucket, delay_seconds, timeout_seconds = self.request_profile(url)
+        self.throttle(bucket, delay_seconds)
+        self.last_request_ts_by_bucket[bucket] = time.time()
         try:
-            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            response = self.session.get(url, timeout=timeout_seconds)
             response.raise_for_status()
             response.encoding = response.encoding or "utf-8"
             return response.text
@@ -338,10 +366,11 @@ class GuideRapideBuilder:
         )
 
     def fetch_json(self, url: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
-        self.throttle()
-        self.last_request_ts = time.time()
+        bucket, delay_seconds, timeout_seconds = self.request_profile(url)
+        self.throttle(bucket, delay_seconds)
+        self.last_request_ts_by_bucket[bucket] = time.time()
         try:
-            response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response = self.session.get(url, params=params, timeout=timeout_seconds)
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, json.JSONDecodeError, ValueError):
@@ -2121,6 +2150,11 @@ class GuideRapideBuilder:
 
     def build(self) -> None:
         log(f"[{self.elapsed()}] Build started")
+        log(
+            f"[{self.elapsed()}] Request profile: "
+            f"guide-rapide(delay={GUIDE_RAPIDE_DELAY_SECONDS}s, timeout={GUIDE_RAPIDE_REQUEST_TIMEOUT}s), "
+            f"metadata-api(delay={METADATA_API_DELAY_SECONDS}s, timeout={METADATA_API_REQUEST_TIMEOUT}s)"
+        )
         run_profile = self.resolve_run_profile()
         discovered_urls = self.discover_film_urls(run_profile)
         movies = self.load_movies(

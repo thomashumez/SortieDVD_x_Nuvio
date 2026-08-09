@@ -109,6 +109,22 @@ Optional tuning for incremental daily runs:
 GR_DISCOVERY_MODE=incremental GR_INCREMENTAL_ARCHIVE_PAGES=150 GR_INCREMENTAL_MOVIE_FETCH_PER_RUN=100 python scripts/build_catalog.py
 ```
 
+Selective acceleration while preserving Guide-Rapide politeness:
+
+```bash
+GR_GUIDE_RAPIDE_DELAY_SECONDS=0.5 \
+GR_GUIDE_RAPIDE_TIMEOUT=30 \
+GR_METADATA_API_DELAY_SECONDS=0.1 \
+GR_METADATA_API_TIMEOUT=20 \
+python scripts/build_catalog.py
+```
+
+Notes:
+
+- `GR_GUIDE_RAPIDE_*` applies only to Guide-Rapide hosts.
+- `GR_METADATA_API_*` applies to OMDb/TMDB/IMDb metadata calls.
+- This allows faster metadata enrichment without increasing load on Guide-Rapide.
+
 Then open `site/manifest.json` or `site/index.html`.
 
 ## GitHub Actions and Pages
