@@ -45,8 +45,23 @@ Main catalogs:
 
 ```bash
 python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
 python scripts/build_catalog.py
 ```
+
+## Code layout
+
+The CLI entrypoint stays intentionally small. The implementation is split by responsibility under `scripts/catalog/`:
+
+- `config.py`: environment validation, paths, URLs, and runtime limits
+- `models.py`: cached movie and provider metadata models
+- `utils.py`: parsing primitives and atomic file I/O
+- `http.py`: throttling, retries, request budgets, and failure telemetry
+- `metadata.py`: OMDb/TMDB/IMDb enrichment and backfill
+- `source.py`: Guide-Rapide discovery, cache, and incremental loading
+- `parser.py`: Guide-Rapide movie-page extraction
+- `output.py`: catalogs, metadata JSON, manifest validation, and publishing
+- `builder.py`: orchestration only
 
 Optional tuning for a bigger one-time backfill:
 
@@ -208,6 +223,15 @@ The scraper is designed to be respectful:
 - Recheck window to avoid re-downloading unchanged historical pages every run
 
 The workflow also restores `data/cache` using `actions/cache` to preserve crawl history across runs.
+
+Production safeguards:
+
+- Runtime settings are validated before crawling; invalid limits, timeouts, or modes fail fast.
+- Metadata requests share a hard per-run budget, including title-to-IMDb lookup calls.
+- Cache and generated files are written atomically, so interrupted writes do not leave partial JSON.
+- The static site is built in a temporary directory, schema-checked, and published only after validation.
+- A cold-start run refuses to publish an empty catalog when discovery has failed.
+- Per-request failures are logged by host and error type without logging API keys.
 
 The previous cache namespace input (example: `v2`) is not required anymore.
 If you need to invalidate remote caches in the future, you can change the cache key prefix in `.github/workflows/build.yml`.

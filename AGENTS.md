@@ -26,12 +26,24 @@ The script discovers movie pages, parses physical release dates (DVD/Blu-ray), e
 
 ## Important Files
 
-- `scripts/build_catalog.py`: main crawler, enricher, and static exporter.
-- `build_catalog.py`: convenience entrypoint/wrapper.
+- `scripts/build_catalog.py`: stable CLI entrypoint; keep this file thin.
+- `build_catalog.py`: repository-root convenience wrapper for the CLI.
+- `scripts/catalog/builder.py`: top-level orchestration and HTTP session setup.
+- `scripts/catalog/config.py`: validated environment configuration, paths, URLs, and limits.
+- `scripts/catalog/models.py`: `Movie` and `ImdbMetadata` data models.
+- `scripts/catalog/utils.py`: pure parsing helpers, logging, and atomic file I/O.
+- `scripts/catalog/http.py`: request profiles, throttling, retries, metadata request budget, and failure telemetry.
+- `scripts/catalog/metadata.py`: OMDb/TMDB/IMDb lookup, enrichment, and backfill logic.
+- `scripts/catalog/source.py`: Guide-Rapide discovery, archive/RSS handling, cache, and incremental loading.
+- `scripts/catalog/parser.py`: Guide-Rapide movie-page parsing and canonical ID construction.
+- `scripts/catalog/output.py`: catalog/meta serialization, manifest validation, and staged site publishing.
+- `tests/test_build_catalog.py`: regression tests for configuration, I/O, host validation, request budgets, and publishing.
 - `.github/workflows/build.yml`: scheduled/manual/push automation and Pages deploy.
 - `requirements.txt`: Python dependencies.
 - `site/`: generated static addon payload.
 - `data/cache/`: local cache and state for incremental behavior.
+
+When changing behavior, edit the owning module under `scripts/catalog/` rather than putting new logic back into the CLI entrypoint.
 
 ## Output Contract
 
@@ -43,6 +55,8 @@ Generated files:
 Important behavior:
 - Catalog files are lightweight previews.
 - Full metadata lives in `site/meta/movie/{id}.json`.
+- The site is generated in a temporary directory, validated, and published as a directory swap.
+- Cache and generated files use atomic writes; do not replace this with direct partial writes.
 
 ## Run Modes
 
@@ -86,10 +100,10 @@ In GitHub Actions, production is API-first and avoids fragile IMDb fallbacks:
 ## Performance Notes
 
 Current crawler behavior is intentionally conservative:
-- request timeout is fixed in code
-- request delay/throttle is fixed in code
+- request timeout and delay are validated runtime settings
 - retries/backoff are enabled
 - network calls are mostly sequential
+- metadata API calls share the hard `GR_MAX_METADATA_API_LOOKUPS_PER_RUN` budget, including title-to-IMDb lookup calls
 
 This favors stability and source politeness over raw speed.
 
@@ -100,6 +114,9 @@ This favors stability and source politeness over raw speed.
 - Keep outputs static-only (no runtime server required).
 - Preserve endpoint compatibility with Nuvio/Stremio consumers.
 - Avoid changing output JSON shape unless explicitly requested.
+- Do not publish an empty cold-start catalog when discovery and cache loading both return no movies.
+- Keep provider secrets out of logs; request-failure telemetry may log host and error type only.
+- Keep provider-specific logic in `metadata.py` until a provider-specific module split is explicitly introduced.
 
 ## Typical Local Commands
 
@@ -107,7 +124,15 @@ Install and run:
 
 ```bash
 python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
 python scripts/build_catalog.py
+```
+
+Syntax and dependency checks:
+
+```bash
+python -m py_compile scripts/build_catalog.py scripts/catalog/*.py tests/test_build_catalog.py
+python -m pip check
 ```
 
 API-enriched run:
@@ -131,7 +156,9 @@ python scripts/build_catalog.py
 
 - Prefer minimal, focused edits.
 - Keep cache/state logic intact unless asked.
-- Validate with a small incremental run first.
+- Preserve the CLI commands and the package boundaries under `scripts/catalog/`.
+- Validate with the unit suite and a small cache-backed incremental run first.
+- Treat `site/` and `data/cache/` as generated/runtime state; do not hand-edit or commit them.
 - Report impact on:
   - discovery count
   - fetched count
