@@ -26,8 +26,8 @@ The build script generates:
 
 Main catalogs:
 
-- DVD 12 mois - Production francaise (`dvd-3-mois-production-francaise`)
-- DVD 12 mois - International (`dvd-3-mois-international`)
+- DVD 12 mois - Production francaise (`dvd-12-mois-production-francaise`)
+- DVD 12 mois - International (`dvd-12-mois-international`)
 - Prochaines sorties (`prochaines-sorties`) when future physical release dates are present
 
 ## Local run
@@ -74,6 +74,11 @@ Triggers:
 - `workflow_dispatch`
 - Push on main for relevant files
 
+Manual workflow options are intentionally minimal:
+
+- `discovery_mode`: `auto` / `full` / `incremental`
+- `wipe_cache`: force cache bypass and a fresh full bootstrap
+
 Pipeline:
 
 1. Install Python dependencies
@@ -106,6 +111,9 @@ The scraper is designed to be respectful:
 - Recheck window to avoid re-downloading unchanged historical pages every run
 
 The workflow also restores `data/cache` using `actions/cache` to preserve crawl history across runs.
+
+The previous cache namespace input (example: `v2`) is not required anymore.
+If you need to invalidate remote caches in the future, you can change the cache key prefix in `.github/workflows/build.yml`.
 
 Default run limits are intentionally conservative for daily automation:
 

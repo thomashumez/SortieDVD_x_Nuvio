@@ -12,26 +12,11 @@ on:
           - auto
           - full
           - incremental
-      full_archive_pages:
-        description: "Only for full mode: archive pages limit"
-        required: false
-        default: "4000"
-        type: string
-      full_movie_fetch:
-        description: "Only for full mode: movie fetch limit"
-        required: false
-        default: "2500"
-        type: string
       wipe_cache:
         description: "Ignore existing scraper cache and rebuild from zero (force fresh bootstrap)"
         required: false
         default: false
         type: boolean
-      cache_namespace:
-        description: "Cache namespace version used to invalidate old remote caches"
-        required: false
-        default: "v2"
-        type: string
   schedule:
     - cron: "17 0-6 * * *"
   push:
@@ -100,9 +85,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/cache
-          key: ${{ runner.os }}-guide-rapide-cache-${{ inputs.cache_namespace || 'v2' }}-${{ github.ref_name }}
+          key: ${{ runner.os }}-guide-rapide-cache-${{ github.ref_name }}
           restore-keys: |
-            ${{ runner.os }}-guide-rapide-cache-${{ inputs.cache_namespace || 'v2' }}-
+            ${{ runner.os }}-guide-rapide-cache-
 
       - name: Wipe local scraper cache
         if: steps.nightly_gate.outputs.should_run == 'true' && inputs.wipe_cache == true
@@ -141,8 +126,6 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GR_DISCOVERY_MODE: ${{ steps.resolve_mode.outputs.discovery_mode }}
-          GR_FULL_ARCHIVE_PAGES: ${{ inputs.full_archive_pages || '4000' }}
-          GR_FULL_MOVIE_FETCH_PER_RUN: ${{ inputs.full_movie_fetch || '2500' }}
         run: python -u scripts/build_catalog.py
 
       - name: Setup Pages
