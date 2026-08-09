@@ -120,6 +120,8 @@ Triggers:
 Manual workflow options are intentionally minimal:
 
 - `discovery_mode`: `auto` / `full` / `incremental`
+- `full_archive_pages`: full-mode archive discovery cap (default `4000`)
+- `full_movie_fetch`: full-mode movie processing cap (default `2500`)
 - `wipe_cache`: force cache bypass and a fresh full bootstrap
 
 Pipeline:

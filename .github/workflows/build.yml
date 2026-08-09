@@ -12,6 +12,16 @@ on:
           - auto
           - full
           - incremental
+      full_archive_pages:
+        description: "Only for full mode: archive pages limit"
+        required: false
+        default: "4000"
+        type: string
+      full_movie_fetch:
+        description: "Only for full mode: movie fetch limit"
+        required: false
+        default: "2500"
+        type: string
       wipe_cache:
         description: "Ignore existing scraper cache and rebuild from zero (force fresh bootstrap)"
         required: false
@@ -126,6 +136,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GR_DISCOVERY_MODE: ${{ steps.resolve_mode.outputs.discovery_mode }}
+          GR_FULL_ARCHIVE_PAGES: ${{ inputs.full_archive_pages || '4000' }}
+          GR_FULL_MOVIE_FETCH_PER_RUN: ${{ inputs.full_movie_fetch || '2500' }}
           GR_METADATA_PROVIDER: "auto"
           GR_OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
           GR_OMDB_API_KEYS: ${{ secrets.OMDB_API_KEYS }}
