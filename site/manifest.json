@@ -25,6 +25,16 @@
       "id": "prochaines-sorties",
       "name": "Prochaines sorties",
       "type": "movie"
+    },
+    {
+      "id": "genre-drame",
+      "name": "Genre - Drame",
+      "type": "movie"
+    },
+    {
+      "id": "genre-comedie",
+      "name": "Genre - Comédie",
+      "type": "movie"
     }
   ],
   "description": "Catalogues francais de sorties DVD et Blu-ray issus de Guide-Rapide.",
