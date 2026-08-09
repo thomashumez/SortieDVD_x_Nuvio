@@ -128,6 +128,7 @@ jobs:
           GR_DISCOVERY_MODE: ${{ steps.resolve_mode.outputs.discovery_mode }}
           GR_METADATA_PROVIDER: "auto"
           GR_OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
+          GR_OMDB_API_KEYS: ${{ secrets.OMDB_API_KEYS }}
           GR_TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           GR_ENABLE_IMDB_SUGGESTION_FALLBACK: "false"
           GR_ENABLE_IMDB_HTML_FALLBACK: "false"

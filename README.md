@@ -23,6 +23,9 @@ Enrichment includes:
 - Synopsis fallback
 - Rating / votes fallback
 - Runtime / genres fallback
+- Writers / production companies
+- Awards / metascore / content rating / box office
+- Critic ratings map (IMDb / Rotten Tomatoes / Metacritic when available)
 
 ## Output
 
@@ -56,6 +59,18 @@ Optional API-first metadata mode (recommended for Nuvio):
 ```bash
 GR_METADATA_PROVIDER=auto GR_OMDB_API_KEY=your_key_here GR_TMDB_API_KEY=your_key_here python scripts/build_catalog.py
 ```
+
+Optional OMDb multi-key fallback (daily quota resilience):
+
+```bash
+GR_OMDB_API_KEYS=key1,key2,key3 python scripts/build_catalog.py
+```
+
+Notes:
+
+- `GR_OMDB_API_KEY` is the primary key.
+- `GR_OMDB_API_KEYS` is an optional comma-separated fallback pool.
+- The builder automatically switches keys on OMDb `Invalid API key` or `Request limit reached` responses.
 
 Provider options:
 
@@ -131,6 +146,12 @@ Use a GitHub Actions secret:
 4. Value: your private OMDb API key
 
 The workflow already reads this secret via `secrets.OMDB_API_KEY`, so nightly runs continue to work without exposing the key in Git history.
+
+Optional (recommended for quota fallback):
+
+1. New repository secret
+2. Name: `OMDB_API_KEYS`
+3. Value: `key1,key2,key3`
 
 ### Configure TMDB key securely (recommended)
 

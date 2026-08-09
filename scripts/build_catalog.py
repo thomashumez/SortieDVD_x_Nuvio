@@ -50,6 +50,7 @@ IMDB_SUGGESTION_API = "https://v3.sg.media-imdb.com/suggestion"
 MAX_IMDB_POSTER_REFRESH_PER_RUN = int(os.getenv("GR_MAX_IMDB_POSTER_REFRESH_PER_RUN", "80"))
 METADATA_PROVIDER = os.getenv("GR_METADATA_PROVIDER", "auto").strip().lower()
 OMDB_API_KEY = os.getenv("GR_OMDB_API_KEY", "").strip()
+OMDB_API_KEYS_RAW = os.getenv("GR_OMDB_API_KEYS", "").strip()
 OMDB_API_URL = "https://www.omdbapi.com/"
 TMDB_API_KEY = os.getenv("GR_TMDB_API_KEY", "").strip()
 TMDB_API_URL = "https://api.themoviedb.org/3"
@@ -119,6 +120,13 @@ class Movie:
     voters: Optional[int]
     poster: str
     trailer_url: str
+    writers: list[str]
+    production_companies: list[str]
+    critic_ratings: dict[str, str]
+    content_rating: str
+    box_office: str
+    awards: str
+    metascore: str
     imdb_id: str
     production_countries: list[str]
     dvd_release_date: str
@@ -143,6 +151,13 @@ class ImdbMetadata:
     voters: Optional[int] = None
     runtime: str = ""
     trailer_url: str = ""
+    writers: list[str] | None = None
+    production_companies: list[str] | None = None
+    critic_ratings: dict[str, str] | None = None
+    content_rating: str = ""
+    box_office: str = ""
+    awards: str = ""
+    metascore: str = ""
 
 
 def normalize_text(value: str) -> str:
@@ -273,6 +288,7 @@ class GuideRapideBuilder:
             self.imdb_cache = {}
 
         self.metadata_provider = METADATA_PROVIDER if METADATA_PROVIDER in {"auto", "imdb", "omdb", "tmdb"} else "auto"
+        self.omdb_api_keys = self.build_omdb_key_pool()
 
     def elapsed(self) -> str:
         seconds = int(time.monotonic() - self.start_ts)
@@ -310,10 +326,46 @@ class GuideRapideBuilder:
             return None
         return payload
 
+    def build_omdb_key_pool(self) -> list[str]:
+        keys: list[str] = []
+        if OMDB_API_KEY:
+            keys.append(OMDB_API_KEY)
+        if OMDB_API_KEYS_RAW:
+            for raw in OMDB_API_KEYS_RAW.split(","):
+                key = normalize_text(raw)
+                if key:
+                    keys.append(key)
+
+        # Preserve order while dropping duplicates.
+        return list(dict.fromkeys(keys))
+
+    def fetch_omdb_json_with_key_fallback(self, params: dict[str, str]) -> Optional[dict]:
+        if not self.omdb_api_keys:
+            return None
+
+        for key in self.omdb_api_keys:
+            payload = self.fetch_json(OMDB_API_URL, params={**params, "apikey": key})
+            if not payload:
+                continue
+
+            # Switch to next key when current key is invalid or daily quota is exhausted.
+            response_ok = normalize_text(str(payload.get("Response") or "")).lower() == "true"
+            if response_ok:
+                return payload
+
+            error_text = normalize_text(str(payload.get("Error") or "")).lower()
+            if "invalid api key" in error_text or "request limit reached" in error_text:
+                continue
+
+            # For true content misses (movie not found), no need to try every key.
+            return payload
+
+        return None
+
     def should_use_omdb(self) -> bool:
         if self.metadata_provider == "imdb":
             return False
-        return bool(OMDB_API_KEY)
+        return bool(self.omdb_api_keys)
 
     def should_use_tmdb(self) -> bool:
         if self.metadata_provider == "imdb":
@@ -393,10 +445,43 @@ class GuideRapideBuilder:
                 if name:
                     genres.append(name)
 
+        production_companies: list[str] = []
+        companies_raw = details.get("production_companies")
+        if isinstance(companies_raw, list):
+            for item in companies_raw:
+                if not isinstance(item, dict):
+                    continue
+                name = normalize_text(str(item.get("name") or ""))
+                if name:
+                    production_companies.append(name)
+
+        trailer_url = ""
+        videos = details.get("videos")
+        if isinstance(videos, dict):
+            results = videos.get("results")
+            if isinstance(results, list):
+                for video in results:
+                    if not isinstance(video, dict):
+                        continue
+                    if normalize_text(str(video.get("site") or "")).lower() != "youtube":
+                        continue
+                    kind = normalize_text(str(video.get("type") or "")).lower()
+                    if kind not in {"trailer", "teaser"}:
+                        continue
+                    key = normalize_text(str(video.get("key") or ""))
+                    if not key:
+                        continue
+                    trailer_url = f"https://www.youtube.com/watch?v={key}"
+                    break
+
         rating = ""
         vote_average = details.get("vote_average")
         if isinstance(vote_average, (int, float)) and vote_average > 0:
             rating = f"{vote_average:.1f}".rstrip("0").rstrip(".")
+
+        ratings_map: dict[str, str] = {}
+        if rating:
+            ratings_map["TMDB"] = f"{rating}/10"
 
         voters = None
         vote_count = details.get("vote_count")
@@ -423,7 +508,14 @@ class GuideRapideBuilder:
             rating=rating,
             voters=voters,
             runtime=runtime,
-            trailer_url="",
+            trailer_url=trailer_url,
+            writers=None,
+            production_companies=list(dict.fromkeys(production_companies)) or None,
+            critic_ratings=ratings_map or None,
+            content_rating="",
+            box_office="",
+            awards="",
+            metascore="",
         )
 
     def omdb_payload_to_metadata(self, payload: dict) -> ImdbMetadata:
@@ -437,6 +529,8 @@ class GuideRapideBuilder:
 
         directors = split_list(str(payload.get("Director") or "").replace("N/A", ""))
         actors = split_list(str(payload.get("Actors") or "").replace("N/A", ""))
+        writers = split_list(str(payload.get("Writer") or "").replace("N/A", ""))
+        production_companies = split_list(str(payload.get("Production") or "").replace("N/A", ""))
 
         genres = split_list(str(payload.get("Genre") or "").replace("N/A", ""))
 
@@ -459,6 +553,33 @@ class GuideRapideBuilder:
         if description == "N/A":
             description = ""
 
+        content_rating = normalize_text(str(payload.get("Rated") or ""))
+        if content_rating == "N/A":
+            content_rating = ""
+
+        box_office = normalize_text(str(payload.get("BoxOffice") or ""))
+        if box_office == "N/A":
+            box_office = ""
+
+        ratings_map: dict[str, str] = {}
+        ratings_raw = payload.get("Ratings")
+        if isinstance(ratings_raw, list):
+            for item in ratings_raw:
+                if not isinstance(item, dict):
+                    continue
+                source = normalize_text(str(item.get("Source") or ""))
+                value = normalize_text(str(item.get("Value") or ""))
+                if source and value:
+                    ratings_map[source] = value
+
+        awards = normalize_text(str(payload.get("Awards") or ""))
+        if awards == "N/A":
+            awards = ""
+
+        metascore = normalize_text(str(payload.get("Metascore") or ""))
+        if metascore == "N/A":
+            metascore = ""
+
         return ImdbMetadata(
             title=title,
             year=year,
@@ -471,6 +592,13 @@ class GuideRapideBuilder:
             voters=voters,
             runtime=runtime,
             trailer_url="",
+            writers=writers or None,
+            production_companies=production_companies or None,
+            critic_ratings=ratings_map or None,
+            content_rating=content_rating,
+            box_office=box_office,
+            awards=awards,
+            metascore=metascore,
         )
 
     def lookup_imdb_id_via_omdb(self, title: str, year: Optional[int]) -> str:
@@ -487,11 +615,11 @@ class GuideRapideBuilder:
             imdb_id = str(cached.get("imdb_id", ""))
             return imdb_id if re.fullmatch(r"tt\d+", imdb_id) else ""
 
-        params = {"apikey": OMDB_API_KEY, "t": cleaned_title, "plot": "short"}
+        params = {"t": cleaned_title, "plot": "short"}
         if year is not None:
             params["y"] = str(year)
 
-        payload = self.fetch_json(OMDB_API_URL, params=params)
+        payload = self.fetch_omdb_json_with_key_fallback(params=params)
         if not payload or str(payload.get("Response", "")).lower() != "true":
             self.imdb_cache[cache_key] = {"imdb_id": ""}
             return ""
@@ -570,8 +698,8 @@ class GuideRapideBuilder:
         if not self.should_use_omdb() or not re.fullmatch(r"tt\d+", imdb_id):
             return ImdbMetadata()
 
-        params = {"apikey": OMDB_API_KEY, "i": imdb_id, "plot": "full"}
-        payload = self.fetch_json(OMDB_API_URL, params=params)
+        params = {"i": imdb_id, "plot": "full"}
+        payload = self.fetch_omdb_json_with_key_fallback(params=params)
         if not payload or str(payload.get("Response", "")).lower() != "true":
             return ImdbMetadata()
 
@@ -604,7 +732,7 @@ class GuideRapideBuilder:
 
         details = self.fetch_tmdb_json(
             f"/movie/{movie_id}",
-            params={"append_to_response": "credits"},
+            params={"append_to_response": "credits,videos"},
         )
         if not isinstance(details, dict):
             return ImdbMetadata()
@@ -839,6 +967,13 @@ class GuideRapideBuilder:
             return None
 
         payload.setdefault("production_countries", [])
+        payload.setdefault("writers", [])
+        payload.setdefault("production_companies", [])
+        payload.setdefault("critic_ratings", {})
+        payload.setdefault("content_rating", "")
+        payload.setdefault("box_office", "")
+        payload.setdefault("awards", "")
+        payload.setdefault("metascore", "")
 
         try:
             return Movie(**payload)
@@ -1229,6 +1364,13 @@ class GuideRapideBuilder:
             voters=voters,
             poster=self.extract_poster(soup, url),
             trailer_url=self.extract_trailer_url(raw_html),
+            writers=[],
+            production_companies=[],
+            critic_ratings={},
+            content_rating="",
+            box_office="",
+            awards="",
+            metascore="",
             imdb_id=imdb_id,
             production_countries=self.extract_production_countries(raw_html, text_blob),
             dvd_release_date=dt_to_iso(dvd_dt),
@@ -1255,12 +1397,32 @@ class GuideRapideBuilder:
                 pass
 
         omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
-        if omdb_meta.title or omdb_meta.poster or omdb_meta.description:
-            return omdb_meta
-
         tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
-        if tmdb_meta.title or tmdb_meta.poster or tmdb_meta.description:
-            return tmdb_meta
+
+        merged = ImdbMetadata(
+            title=omdb_meta.title or tmdb_meta.title,
+            year=omdb_meta.year if omdb_meta.year is not None else tmdb_meta.year,
+            director=omdb_meta.director or tmdb_meta.director,
+            actors=omdb_meta.actors or tmdb_meta.actors,
+            poster=omdb_meta.poster or tmdb_meta.poster,
+            description=omdb_meta.description or tmdb_meta.description,
+            genres=omdb_meta.genres or tmdb_meta.genres,
+            rating=omdb_meta.rating or tmdb_meta.rating,
+            voters=omdb_meta.voters if omdb_meta.voters is not None else tmdb_meta.voters,
+            runtime=omdb_meta.runtime or tmdb_meta.runtime,
+            trailer_url=omdb_meta.trailer_url or tmdb_meta.trailer_url,
+            writers=omdb_meta.writers or tmdb_meta.writers,
+            production_companies=omdb_meta.production_companies or tmdb_meta.production_companies,
+            critic_ratings=omdb_meta.critic_ratings or tmdb_meta.critic_ratings,
+            content_rating=omdb_meta.content_rating or tmdb_meta.content_rating,
+            box_office=omdb_meta.box_office or tmdb_meta.box_office,
+            awards=omdb_meta.awards or tmdb_meta.awards,
+            metascore=omdb_meta.metascore or tmdb_meta.metascore,
+        )
+
+        if merged.title or merged.poster or merged.description or merged.trailer_url:
+            self.imdb_cache[imdb_id] = asdict(merged)
+            return merged
 
         if not ENABLE_IMDB_HTML_FALLBACK:
             return ImdbMetadata()
@@ -1368,6 +1530,20 @@ class GuideRapideBuilder:
                 str(trailer_raw.get("embedUrl") or trailer_raw.get("url") or "")
             )
 
+        writers: list[str] = []
+        writer_raw = data.get("creator")
+        if isinstance(writer_raw, dict):
+            name = normalize_text(str(writer_raw.get("name") or ""))
+            if name:
+                writers.append(name)
+        elif isinstance(writer_raw, list):
+            for item in writer_raw:
+                if not isinstance(item, dict):
+                    continue
+                name = normalize_text(str(item.get("name") or ""))
+                if name:
+                    writers.append(name)
+
         meta = ImdbMetadata(
             title=normalize_text(str(data.get("name") or "")),
             year=year,
@@ -1380,6 +1556,13 @@ class GuideRapideBuilder:
             voters=voters,
             runtime=runtime,
             trailer_url=trailer_url,
+            writers=list(dict.fromkeys(writers)) or None,
+            production_companies=None,
+            critic_ratings=None,
+            content_rating="",
+            box_office="",
+            awards="",
+            metascore="",
         )
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
@@ -1432,6 +1615,27 @@ class GuideRapideBuilder:
             changed = True
         if imdb.trailer_url and movie.trailer_url != imdb.trailer_url:
             movie.trailer_url = imdb.trailer_url
+            changed = True
+        if imdb.writers and movie.writers != imdb.writers:
+            movie.writers = imdb.writers
+            changed = True
+        if imdb.production_companies and movie.production_companies != imdb.production_companies:
+            movie.production_companies = imdb.production_companies
+            changed = True
+        if imdb.critic_ratings and movie.critic_ratings != imdb.critic_ratings:
+            movie.critic_ratings = imdb.critic_ratings
+            changed = True
+        if imdb.content_rating and movie.content_rating != imdb.content_rating:
+            movie.content_rating = imdb.content_rating
+            changed = True
+        if imdb.box_office and movie.box_office != imdb.box_office:
+            movie.box_office = imdb.box_office
+            changed = True
+        if imdb.awards and movie.awards != imdb.awards:
+            movie.awards = imdb.awards
+            changed = True
+        if imdb.metascore and movie.metascore != imdb.metascore:
+            movie.metascore = imdb.metascore
             changed = True
 
         return changed
@@ -1524,6 +1728,13 @@ class GuideRapideBuilder:
             if not isinstance(payload, dict):
                 continue
             payload.setdefault("production_countries", [])
+            payload.setdefault("writers", [])
+            payload.setdefault("production_companies", [])
+            payload.setdefault("critic_ratings", {})
+            payload.setdefault("content_rating", "")
+            payload.setdefault("box_office", "")
+            payload.setdefault("awards", "")
+            payload.setdefault("metascore", "")
             try:
                 cached = Movie(**payload)
             except TypeError:
@@ -1642,7 +1853,7 @@ class GuideRapideBuilder:
             "releaseInfo": self.release_info_text(movie),
             "country": " / ".join(movie.production_countries) if movie.production_countries else "",
             "language": "fr",
-            "logo": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
+            "logo": movie.poster or "https://www.guide-rapide.com/IMG/divers/favicon.ico",
             "links": [{"name": "Guide-Rapide", "category": "source", "url": movie.source_url}],
         }
 
@@ -1654,6 +1865,20 @@ class GuideRapideBuilder:
             meta["runtime"] = movie.runtime
         if movie.voters is not None:
             meta["votes"] = str(movie.voters)
+        if movie.content_rating:
+            meta["contentRating"] = movie.content_rating
+        if movie.box_office:
+            meta["boxOffice"] = movie.box_office
+        if movie.critic_ratings:
+            meta["criticRatings"] = movie.critic_ratings
+        if movie.writers:
+            meta["writer"] = movie.writers
+        if movie.awards:
+            meta["awards"] = movie.awards
+        if movie.metascore:
+            meta["metascore"] = movie.metascore
+        if movie.production_companies:
+            meta["productionCompanies"] = movie.production_companies
         if movie.imdb_id:
             meta["imdb_id"] = movie.imdb_id
             meta["links"].append(
