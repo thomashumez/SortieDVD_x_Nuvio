@@ -1235,7 +1235,7 @@ class GuideRapideBuilder:
         manifest = {
             "id": "org.guiderapide.nuvio",
             "version": datetime.now(timezone.utc).strftime("%Y.%m.%d"),
-            "name": "Guide-Rapide France DVD/Blu-ray",
+            "name": "Sortie DVD Tracker",
             "description": "Catalogues francais de sorties DVD et Blu-ray issus de Guide-Rapide.",
             "logo": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
             "background": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
