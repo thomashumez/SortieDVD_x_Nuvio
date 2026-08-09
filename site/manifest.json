@@ -1,29 +1,50 @@
 {
+  "background": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
+  "catalogs": [
+    {
+      "id": "dvd-france-nouveautes",
+      "name": "DVD France - Nouveautes",
+      "type": "movie"
+    },
+    {
+      "id": "dvd-bluray-france",
+      "name": "DVD + Blu-ray France",
+      "type": "movie"
+    },
+    {
+      "id": "bluray-france",
+      "name": "Blu-ray France",
+      "type": "movie"
+    },
+    {
+      "id": "toutes-sorties-physiques",
+      "name": "Toutes les sorties physiques",
+      "type": "movie"
+    },
+    {
+      "id": "prochaines-sorties",
+      "name": "Prochaines sorties",
+      "type": "movie"
+    }
+  ],
+  "description": "Catalogues francais de sorties DVD et Blu-ray issus de Guide-Rapide.",
   "id": "org.guiderapide.nuvio",
-  "version": "1.0.0",
-  "name": "Guide Rapide",
-  "description": "Guide Rapide French DVD and Blu-ray release catalog",
-  "logo": "https://www.guide-rapide.com/favicon.ico",
-  "background": "https://www.guide-rapide.com/favicon.ico",
+  "logo": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
+  "name": "Guide-Rapide France DVD/Blu-ray",
   "resources": [
     "catalog",
     {
+      "idPrefixes": [
+        "gr-film-"
+      ],
       "name": "meta",
-      "types": ["movie"],
-      "idPrefixes": ["gr:"]
+      "types": [
+        "movie"
+      ]
     }
   ],
-  "types": ["movie"],
-  "catalogs": [
-    {
-      "type": "movie",
-      "id": "all-releases",
-      "name": "Guide Rapide - All releases"
-    },
-    {
-      "type": "movie",
-      "id": "dvd-france",
-      "name": "Guide Rapide - DVD France"
-    }
-  ]
+  "types": [
+    "movie"
+  ],
+  "version": "2026.08.09"
 }

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Generated static addon output
+site/catalog/
+site/meta/
+site/index.html
+site/manifest.json
+
+# Scraper runtime cache
+data/cache/

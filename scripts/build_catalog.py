@@ -1,96 +1,106 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import time
 import unicodedata
-from collections import deque
-from dataclasses import dataclass, asdict
+from collections import Counter, deque
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 from urllib.parse import urljoin, urlparse
+from xml.etree import ElementTree
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://www.guide-rapide.com/"
-OUTPUT_DIR = Path("site")
+RSS_URL = "https://www.guide-rapide.com/fluxrss.xml"
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = ROOT_DIR / "site"
 CATALOG_DIR = OUTPUT_DIR / "catalog" / "movie"
 META_DIR = OUTPUT_DIR / "meta" / "movie"
-REQUEST_TIMEOUT = 20
-MAX_PAGES = 2500
-CURRENT_YEAR = datetime.now().year
+CACHE_DIR = ROOT_DIR / "data" / "cache"
+PAGE_CACHE_DIR = CACHE_DIR / "pages"
+MOVIE_CACHE_DIR = CACHE_DIR / "movies"
+STATE_FILE = CACHE_DIR / "state.json"
+
+REQUEST_TIMEOUT = 30
+REQUEST_DELAY_SECONDS = 0.5
+MAX_ARCHIVE_PAGES = int(os.getenv("GR_MAX_ARCHIVE_PAGES", "850"))
+MAX_MOVIE_FETCH_PER_RUN = int(os.getenv("GR_MAX_MOVIE_FETCH_PER_RUN", "320"))
 START_YEAR = 2000
+CURRENT_YEAR = datetime.now(timezone.utc).year
+ARCHIVE_CACHE_TTL_HOURS = 20
+MOVIE_RECHECK_DAYS = 45
+
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; GuideRapideNuvioBot/1.0; "
-        "https://github.com/guide-rapide-nuvio)"
+        "Mozilla/5.0 (compatible; GuideRapideNuvioBot/2.0; "
+        "https://github.com/)"
     )
 }
 
 MONTHS = {
     "janvier": 1,
     "jan": 1,
+    "janv": 1,
     "fevrier": 2,
-    "février": 2,
     "fev": 2,
+    "fevr": 2,
+    "février": 2,
     "fév": 2,
     "mars": 3,
     "avril": 4,
+    "avr": 4,
     "mai": 5,
     "juin": 6,
     "juillet": 7,
+    "juil": 7,
     "aout": 8,
     "août": 8,
     "septembre": 9,
+    "sept": 9,
     "octobre": 10,
+    "oct": 10,
     "novembre": 11,
+    "nov": 11,
     "decembre": 12,
     "décembre": 12,
-}
-
-FIELD_PATTERNS = {
-    "release_line": re.compile(
-        r"Date vente dvd(?: et BLU RAY| et Blu Ray| et blu ray)?\s*:\s*(.+?)(?:<br|\n|$)",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    "blue_release_line": re.compile(
-        r"Date vente BLU RAY\s*:\s*(.+?)(?:<br|\n|$)",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    "year": re.compile(r"Ann[éee] de r[ée]alisation\s*:\s*(\d{4})", re.IGNORECASE),
-    "director": re.compile(r"Realisateur\s*:\s*(.+?)(?:<br|\n|$)", re.IGNORECASE | re.DOTALL),
-    "actors": re.compile(r"Acteurs\s*:\s*(.+?)(?:<br|\n|$)", re.IGNORECASE | re.DOTALL),
-    "genres": re.compile(r"Genre\s*:\s*(.+?)(?:<br|\n|$)", re.IGNORECASE | re.DOTALL),
-    "score": re.compile(
-        r"Note moyenn[ée]e\s*=\s*(\d+[\.,]\d+)\s*/10", re.IGNORECASE
-    ),
-    "voters": re.compile(r"Nombre de votants cumul[ée]s .*?:\s*([\d\s\u00a0]+)", re.IGNORECASE),
-    "synopsis": re.compile(
-        r"Synopsis\s*:\s*(.+?)(?:<br\s*/?>\s*<br\s*/?>|Voir la vid[ée]o sur|$)",
-        re.IGNORECASE | re.DOTALL,
-    ),
+    "dec": 12,
 }
 
 
 @dataclass
-class FilmEntry:
+class Movie:
     id: str
-    type: str
-    name: str
+    source_url: str
+    guide_rapide_id: int
+    title: str
+    year: Optional[int]
+    director: list[str]
+    actors: list[str]
+    runtime: str
+    genres: list[str]
+    synopsis: str
+    rating: str
+    voters: Optional[int]
     poster: str
-    posterShape: str = "poster"
-    description: str = ""
-    releaseInfo: str = ""
-    released: str = ""
-    genres: list[str] | None = None
-    director: list[str] | None = None
-    cast: list[str] | None = None
-    imdbRating: str = ""
-    country: str = "France"
-    language: str = "fr"
-    sourceUrl: str = ""
-    releaseText: str = ""
+    trailer_url: str
+    imdb_id: str
+    dvd_release_date: str
+    bluray_release_date: str
+    release_type: str
+    release_text: str
+    released: str
+    physical_available: bool
+    checked_at: str
 
 
 def normalize_text(value: str) -> str:
@@ -103,63 +113,148 @@ def strip_accents(value: str) -> str:
     )
 
 
-def parse_french_date(value: str) -> Optional[datetime]:
-    cleaned = normalize_text(value).lower()
-    cleaned = cleaned.replace("1er", "1")
-    cleaned = strip_accents(cleaned)
-    parts = cleaned.split()
-    if len(parts) < 3:
+def slugify(value: str) -> str:
+    value = strip_accents(value).lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-") or "genre"
+
+
+def parse_int(value: str) -> Optional[int]:
+    cleaned = re.sub(r"[^\d]", "", value)
+    if not cleaned:
         return None
+    return int(cleaned)
+
+
+def parse_french_date(raw: str) -> Optional[datetime]:
+    value = normalize_text(raw).lower()
+    value = value.replace("1er", "1")
+    value = strip_accents(value)
+    value = re.sub(r"\b(vers|environ|sortie|prevue|prévue)\b", " ", value)
+    match = re.search(r"(\d{1,2})\s+([a-z]+)\s+(\d{4})", value)
+    if not match:
+        return None
+
+    day = int(match.group(1))
+    month = MONTHS.get(match.group(2))
+    year = int(match.group(3))
+    if not month:
+        return None
+
     try:
-        day = int(parts[0])
-        month = MONTHS.get(parts[1])
-        year = int(parts[2])
-        if not month:
-            return None
         return datetime(year, month, day, tzinfo=timezone.utc)
-    except Exception:
+    except ValueError:
         return None
 
 
-def split_names(value: str) -> list[str]:
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = normalize_text(value)
-    parts = re.split(r"\s*,\s*", value)
-    return [p for p in (normalize_text(x) for x in parts) if p]
+def dt_to_iso(dt: Optional[datetime]) -> str:
+    if not dt:
+        return ""
+    return dt.date().isoformat()
 
 
-def split_genres(value: str) -> list[str]:
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = normalize_text(value)
-    parts = re.split(r"\s*,\s*", value)
-    return [p for p in (normalize_text(x) for x in parts) if p]
+def read_json(path: Path, default: object) -> object:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return default
 
 
-def safe_json(obj: object, path: Path) -> None:
+def write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
-class Crawler:
+def split_list(value: str) -> list[str]:
+    parts = [normalize_text(x) for x in re.split(r"\s*,\s*", value)]
+    return [x for x in parts if x]
+
+
+class GuideRapideBuilder:
     def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
-        self.visited_pages: set[str] = set()
-        self.film_urls: set[str] = set()
-        self.entries: dict[str, FilmEntry] = {}
+        retries = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET"]),
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
-    def fetch(self, url: str) -> Optional[str]:
+        self.last_request_ts = 0.0
+
+        self.state = read_json(STATE_FILE, default={"movies": {}, "last_run": ""})
+        if not isinstance(self.state, dict):
+            self.state = {"movies": {}, "last_run": ""}
+        if not isinstance(self.state.get("movies"), dict):
+            self.state["movies"] = {}
+
+    def throttle(self) -> None:
+        now = time.time()
+        wait_for = REQUEST_DELAY_SECONDS - (now - self.last_request_ts)
+        if wait_for > 0:
+            time.sleep(wait_for)
+
+    def fetch_url(self, url: str) -> Optional[str]:
+        self.throttle()
+        self.last_request_ts = time.time()
         try:
-            resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            response.encoding = response.encoding or "utf-8"
+            return response.text
         except requests.RequestException:
             return None
-        if resp.status_code >= 400:
+
+    def cache_key(self, url: str) -> str:
+        return hashlib.sha1(url.encode("utf-8")).hexdigest()
+
+    def fetch_archive_page(self, url: str) -> Optional[str]:
+        key = self.cache_key(url)
+        html_path = PAGE_CACHE_DIR / f"{key}.html"
+        meta_path = PAGE_CACHE_DIR / f"{key}.json"
+
+        meta = read_json(meta_path, default={})
+        fetched_at = ""
+        if isinstance(meta, dict):
+            fetched_at = str(meta.get("fetched_at", ""))
+
+        if html_path.exists() and fetched_at:
+            try:
+                fetched_dt = datetime.fromisoformat(fetched_at)
+                age_hours = (datetime.now(timezone.utc) - fetched_dt).total_seconds() / 3600
+                if age_hours < ARCHIVE_CACHE_TTL_HOURS:
+                    return html_path.read_text(encoding="utf-8")
+            except ValueError:
+                pass
+
+        html = self.fetch_url(url)
+        if html is None:
             return None
-        return resp.text
+
+        PAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(html, encoding="utf-8")
+        write_json(meta_path, {"url": url, "fetched_at": datetime.now(timezone.utc).isoformat()})
+        return html
 
     def build_seed_urls(self) -> list[str]:
-        seeds = [BASE_URL]
-        for year in range(START_YEAR, CURRENT_YEAR + 1):
+        seeds = [
+            urljoin(BASE_URL, "accueil.html"),
+            urljoin(BASE_URL, "accueil-actualite-dvd-vod-bluray-a-la-une-note.html"),
+            RSS_URL,
+        ]
+
+        for year in range(START_YEAR, CURRENT_YEAR + 2):
             seeds.extend(
                 [
                     urljoin(BASE_URL, f"accueil-{year}-tous-note.html"),
@@ -170,276 +265,666 @@ class Crawler:
                     urljoin(BASE_URL, f"dvd-vente-{year}-futur-date.html"),
                 ]
             )
-            if year == CURRENT_YEAR:
-                for month in range(1, 13):
-                    seeds.extend(
-                        [
-                            urljoin(BASE_URL, f"accueil-{year}-{month:02d}-note.html"),
-                            urljoin(BASE_URL, f"accueil-{year}-{month}-note.html"),
-                        ]
-                    )
+
+        for month in range(1, 13):
+            seeds.append(urljoin(BASE_URL, f"accueil-{CURRENT_YEAR}-{month:02d}-note.html"))
+            seeds.append(urljoin(BASE_URL, f"accueil-{CURRENT_YEAR}-{month}-note.html"))
+
         return list(dict.fromkeys(seeds))
 
-    def crawl_archives(self) -> None:
-        queue = deque(self.build_seed_urls())
-        processed_pages = 0
-
-        while queue and processed_pages < MAX_PAGES:
-            url = queue.popleft()
-            if url in self.visited_pages:
-                continue
-            self.visited_pages.add(url)
-            html = self.fetch(url)
-            processed_pages += 1
-            if not html:
-                continue
-
-            soup = BeautifulSoup(html, "lxml")
-            for a in soup.select('a[href*="/film-"]'):
-                href = a.get("href") or ""
-                full = urljoin(url, href)
-                if self.is_internal(full):
-                    self.film_urls.add(full.split("#", 1)[0])
-
-            for a in soup.select("a[href]"):
-                href = a.get("href") or ""
-                full = urljoin(url, href)
-                if self.is_archive_like(full) and full not in self.visited_pages:
-                    queue.append(full)
-
     def is_internal(self, url: str) -> bool:
-        parsed = urlparse(url)
-        return parsed.netloc.endswith("guide-rapide.com")
+        return urlparse(url).netloc.endswith("guide-rapide.com")
 
     def is_archive_like(self, url: str) -> bool:
         if not self.is_internal(url):
             return False
+
         path = urlparse(url).path.lower()
-        return any(
-            token in path
-            for token in (
-                "accueil-",
-                "dvd-vente-",
-                "film-",
-                "fluxrss",
-                "index",
-                "palmares",
-                "sorties",
-                "accueil.html",
-                "/",
-            )
+        if not path.endswith(".html") and "fluxrss.xml" not in path:
+            return False
+
+        archive_tokens = (
+            "accueil",
+            "dvd-vente",
+            "sortie",
+            "palmares",
+            "top",
+            "film-",
+            "fluxrss",
         )
+        return any(token in path for token in archive_tokens)
 
-    def parse_film_page(self, url: str) -> Optional[FilmEntry]:
-        html = self.fetch(url)
-        if not html:
+    def extract_film_id(self, url: str) -> Optional[int]:
+        match = re.search(r"film-(\d+)\.html", url)
+        if not match:
             return None
-        soup = BeautifulSoup(html, "lxml")
-        text = soup.get_text("\n", strip=True)
-        raw_html = str(soup)
+        return int(match.group(1))
 
-        title = self.extract_title(soup)
-        if not title:
+    def discover_film_urls(self) -> dict[int, str]:
+        queue = deque(self.build_seed_urls())
+        visited: set[str] = set()
+        film_urls: dict[int, str] = {}
+
+        processed = 0
+        while queue and processed < MAX_ARCHIVE_PAGES:
+            url = queue.popleft()
+            if url in visited:
+                continue
+            visited.add(url)
+            processed += 1
+
+            html = self.fetch_archive_page(url)
+            if not html:
+                continue
+
+            if url.lower().endswith("fluxrss.xml"):
+                film_urls.update(self.extract_movie_links_from_rss(html))
+                continue
+
+            soup = BeautifulSoup(html, "lxml")
+
+            for a_tag in soup.select("a[href]"):
+                href = a_tag.get("href") or ""
+                full_url = urljoin(url, href).split("#", 1)[0]
+                if not self.is_internal(full_url):
+                    continue
+
+                film_id = self.extract_film_id(full_url)
+                if film_id is not None:
+                    film_urls[film_id] = full_url
+                    continue
+
+                if self.is_archive_like(full_url) and full_url not in visited:
+                    queue.append(full_url)
+
+            if processed % 100 == 0:
+                print(f"Discovery progress: {processed} pages, {len(film_urls)} movie links")
+
+        return film_urls
+
+    def extract_movie_links_from_rss(self, xml_text: str) -> dict[int, str]:
+        out: dict[int, str] = {}
+        try:
+            root = ElementTree.fromstring(xml_text)
+        except ElementTree.ParseError:
+            return out
+
+        for elem in root.findall(".//item/link"):
+            if not elem.text:
+                continue
+            link = elem.text.strip()
+            film_id = self.extract_film_id(link)
+            if film_id is not None:
+                out[film_id] = link
+        return out
+
+    def should_recheck_movie(self, film_id: int) -> bool:
+        state_movies = self.state["movies"]
+        marker = state_movies.get(str(film_id))
+        if not isinstance(marker, dict):
+            return True
+
+        checked_at = marker.get("checked_at")
+        if not isinstance(checked_at, str) or not checked_at:
+            return True
+
+        try:
+            checked_dt = datetime.fromisoformat(checked_at)
+        except ValueError:
+            return True
+
+        age_days = (datetime.now(timezone.utc) - checked_dt).total_seconds() / 86400
+        return age_days >= MOVIE_RECHECK_DAYS
+
+    def read_cached_movie(self, film_id: int) -> Optional[Movie]:
+        cache_file = MOVIE_CACHE_DIR / f"film-{film_id}.json"
+        payload = read_json(cache_file, default=None)
+        if not isinstance(payload, dict):
             return None
 
-        release_text = self.extract_field(raw_html, FIELD_PATTERNS["release_line"])
-        if not release_text:
-            release_text = self.extract_field(raw_html, FIELD_PATTERNS["blue_release_line"])
-        release_dt = parse_french_date(release_text or "")
+        try:
+            return Movie(**payload)
+        except TypeError:
+            return None
 
-        year = self.extract_field(text, FIELD_PATTERNS["year"]) or ""
-        director = split_names(self.extract_field(raw_html, FIELD_PATTERNS["director"]) or "")
-        actors = split_names(self.extract_field(raw_html, FIELD_PATTERNS["actors"]) or "")
-        genres = split_genres(self.extract_field(raw_html, FIELD_PATTERNS["genres"]) or "")
-        synopsis = normalize_text(self.extract_field(raw_html, FIELD_PATTERNS["synopsis"]) or "")
-        score = self.extract_field(text, FIELD_PATTERNS["score"]) or ""
-        poster = self.extract_poster(soup, url)
+    def write_cached_movie(self, movie: Movie) -> None:
+        MOVIE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file = MOVIE_CACHE_DIR / f"film-{movie.guide_rapide_id}.json"
+        write_json(cache_file, asdict(movie))
 
-        if not poster:
-            poster = "https://www.guide-rapide.com/favicon.ico"
+    def extract_release_dates(self, soup: BeautifulSoup, raw_html: str) -> tuple[Optional[datetime], Optional[datetime], str]:
+        dvd_date: Optional[datetime] = None
+        bluray_date: Optional[datetime] = None
+        release_text_parts: list[str] = []
 
-        film_id = self.make_id(url)
-        description_bits = []
-        if release_text:
-            description_bits.append(f"Release: {release_text}")
-        if year:
-            description_bits.append(f"Year: {year}")
-        if director:
-            description_bits.append("Director: " + ", ".join(director))
-        if genres:
-            description_bits.append("Genres: " + ", ".join(genres))
-        if synopsis:
-            description_bits.append(synopsis)
-        description = "\n\n".join(description_bits).strip()
+        # Variant 1: explicit labels in plain text.
+        combined = re.search(r"Date vente dvd\s+et\s+BLU\s*RAY\s*:\s*([^<\n]+)", raw_html, re.IGNORECASE)
+        dvd_only = re.search(r"Date vente dvd\s*:\s*([^<\n]+)", raw_html, re.IGNORECASE)
+        br_only = re.search(r"Date vente\s+BLU\s*RAY\s*:\s*([^<\n]+)", raw_html, re.IGNORECASE)
 
-        entry = FilmEntry(
-            id=film_id,
-            type="movie",
-            name=normalize_text(title),
-            poster=poster,
-            description=description,
-            releaseInfo=year,
-            released=release_dt.isoformat().replace("+00:00", "Z") if release_dt else "",
-            genres=genres or [],
-            director=director or [],
-            cast=actors or [],
-            imdbRating=score,
-            sourceUrl=url,
-            releaseText=release_text or "",
-        )
-        return entry
+        if combined:
+            text = normalize_text(combined.group(1))
+            release_text_parts.append(f"DVD + Blu-ray: {text}")
+            dt = parse_french_date(text)
+            dvd_date = dt or dvd_date
+            bluray_date = dt or bluray_date
+
+        if dvd_only:
+            text = normalize_text(dvd_only.group(1))
+            release_text_parts.append(f"DVD: {text}")
+            dt = parse_french_date(text)
+            dvd_date = dt or dvd_date
+
+        if br_only:
+            text = normalize_text(br_only.group(1))
+            release_text_parts.append(f"Blu-ray: {text}")
+            dt = parse_french_date(text)
+            bluray_date = dt or bluray_date
+
+        # Variant 2: two-column date table currently used on many pages.
+        for td in soup.find_all("td"):
+            label_text = normalize_text(td.get_text(" ", strip=True)).lower()
+            if "vente" not in label_text or ("dvd" not in label_text and "blu" not in label_text):
+                continue
+
+            row = td.find_parent("tr")
+            if not row:
+                continue
+
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+
+            labels = [normalize_text(x).lower() for x in cells[0].stripped_strings]
+            values = [normalize_text(x) for x in cells[1].stripped_strings]
+            if not labels or not values:
+                continue
+
+            for i, label in enumerate(labels):
+                if i >= len(values):
+                    break
+                value = normalize_text(values[i]).lstrip(":").strip()
+                if not value:
+                    continue
+                if "inconnue" in value.lower():
+                    release_text_parts.append(f"{labels[i]}: {value}")
+                    continue
+
+                dt = parse_french_date(value)
+                if not dt:
+                    continue
+
+                if "dvd" in label:
+                    dvd_date = dt
+                    release_text_parts.append(f"DVD: {value}")
+                if "blu" in label:
+                    bluray_date = dt
+                    release_text_parts.append(f"Blu-ray: {value}")
+
+        release_text = " | ".join(dict.fromkeys(release_text_parts))
+        return dvd_date, bluray_date, release_text
 
     def extract_title(self, soup: BeautifulSoup) -> str:
-        for selector in ("h1", "title"):
-            el = soup.select_one(selector)
-            if el:
-                value = normalize_text(el.get_text(" ", strip=True))
-                if value:
-                    return re.split(r"\s+[-|]\s+", value)[0].strip()
+        h2_name = soup.select_one('span[itemprop="name"]')
+        if h2_name:
+            name = normalize_text(h2_name.get_text(" ", strip=True))
+            if name:
+                return name
+
+        h1 = soup.select_one("h1")
+        if h1:
+            name = normalize_text(h1.get_text(" ", strip=True))
+            if name:
+                return name
+
+        title_tag = soup.select_one("title")
+        if title_tag:
+            text = normalize_text(title_tag.get_text(" ", strip=True))
+            text = re.sub(r"\s+-\s+.*$", "", text)
+            if text:
+                return text
+
         return ""
 
-    def extract_field(self, text: str, pattern: re.Pattern[str]) -> str:
-        match = pattern.search(text)
+    def extract_directors(self, soup: BeautifulSoup) -> list[str]:
+        directors = []
+        for span in soup.select('span[itemprop="director"] span[itemprop="name"]'):
+            value = normalize_text(span.get_text(" ", strip=True))
+            if value:
+                directors.append(value)
+        if directors:
+            return list(dict.fromkeys(directors))
+
+        raw = normalize_text(soup.get_text(" ", strip=True))
+        match = re.search(r"par\s*:\s*([^\n]+?)\s*(Avec:|Dur[eé]e:|Genre:)", raw, re.IGNORECASE)
+        if not match:
+            return []
+        return split_list(match.group(1))
+
+    def extract_actors(self, soup: BeautifulSoup) -> list[str]:
+        actors = []
+        for a_tag in soup.select('a[href*="acteur-"]'):
+            value = normalize_text(a_tag.get_text(" ", strip=True))
+            if value:
+                actors.append(value)
+        return list(dict.fromkeys(actors))
+
+    def extract_runtime(self, soup: BeautifulSoup, text_blob: str) -> str:
+        duration = soup.select_one('span[itemprop="duration"]')
+        if duration:
+            return normalize_text(duration.get_text(" ", strip=True))
+
+        match = re.search(r"Dur[ée]e\s*:\s*([0-9hmin\s]+)", text_blob, re.IGNORECASE)
+        return normalize_text(match.group(1)) if match else ""
+
+    def extract_genres(self, soup: BeautifulSoup, text_blob: str) -> list[str]:
+        genre_span = soup.select_one('span[itemprop="genre"]')
+        if genre_span:
+            return split_list(genre_span.get_text(" ", strip=True))
+
+        match = re.search(r"Genre\s*:\s*([^\n]+)", text_blob, re.IGNORECASE)
+        if not match:
+            return []
+        return split_list(match.group(1))
+
+    def extract_synopsis(self, soup: BeautifulSoup, raw_html: str) -> str:
+        story = soup.select_one('div[itemprop="description"]')
+        if story:
+            text = normalize_text(story.get_text(" ", strip=True))
+            if text:
+                return text
+
+        match = re.search(
+            r"Synopsis(?: usuel)?\s*:\s*(.+?)(?:<br\s*/?>\s*<br\s*/?>|</td>|$)",
+            raw_html,
+            re.IGNORECASE | re.DOTALL,
+        )
         if not match:
             return ""
         return normalize_text(re.sub(r"<[^>]+>", " ", match.group(1)))
+
+    def extract_rating(self, soup: BeautifulSoup) -> tuple[str, Optional[int]]:
+        rating = ""
+        voters = None
+
+        rating_node = soup.select_one('[itemprop="ratingValue"]')
+        if rating_node:
+            rating = normalize_text(rating_node.get_text(" ", strip=True)).replace(",", ".")
+
+        voters_node = soup.select_one('[itemprop="ratingCount"]')
+        if voters_node:
+            voters = parse_int(voters_node.get_text(" ", strip=True))
+
+        return rating, voters
 
     def extract_poster(self, soup: BeautifulSoup, page_url: str) -> str:
         og = soup.select_one('meta[property="og:image"]')
         if og and og.get("content"):
             return urljoin(page_url, og["content"])
-        link = soup.select_one('link[rel="image_src"]')
-        if link and link.get("href"):
-            return urljoin(page_url, link["href"])
-        img = soup.select_one("img[src]")
-        if img and img.get("src"):
-            return urljoin(page_url, img["src"])
-        return ""
 
-    def make_id(self, url: str) -> str:
-        path = urlparse(url).path.rstrip("/")
-        leaf = path.split("/")[-1]
-        leaf = leaf.replace(".html", "")
-        return f"gr:{leaf}"
+        for img in soup.select("img[src]"):
+            src = img.get("src") or ""
+            alt = (img.get("alt") or "").lower()
+            lowered_src = src.lower()
+            if any(token in lowered_src for token in ("imdb-", "allocine", "favicon", "logo/")):
+                continue
 
-    def build(self) -> None:
-        self.crawl_archives()
+            width = parse_int(str(img.get("width") or "")) or 0
+            height = parse_int(str(img.get("height") or "")) or 0
 
-        for film_url in sorted(self.film_urls):
-            if len(self.entries) >= MAX_PAGES:
-                break
-            entry = self.parse_film_page(film_url)
-            if entry:
-                self.entries[entry.id] = entry
+            if "img/affiches/" in lowered_src:
+                return urljoin(page_url, src)
+            if ("sortie" in alt or "affiche" in lowered_src) and (width >= 180 or height >= 260):
+                return urljoin(page_url, src)
 
-        items = list(self.entries.values())
-        items.sort(key=lambda item: item.released or "", reverse=True)
+        fallback = soup.select_one("img[src]")
+        if fallback and fallback.get("src"):
+            return urljoin(page_url, fallback["src"])
 
-        all_metas = [self.to_meta_preview(item) for item in items]
-        dvd_metas = [meta for meta in all_metas if self.is_dvd_item(meta)]
+        return "https://www.guide-rapide.com/IMG/divers/favicon.ico"
 
-        safe_json({"metas": all_metas}, CATALOG_DIR / "all-releases.json")
-        safe_json({"metas": dvd_metas}, CATALOG_DIR / "dvd-france.json")
+    def extract_imdb_id(self, soup: BeautifulSoup) -> str:
+        imdb_link = soup.select_one('a[href*="imdb.com/title/"]')
+        if not imdb_link or not imdb_link.get("href"):
+            return ""
+        match = re.search(r"/title/(tt\d+)", imdb_link["href"])
+        return match.group(1) if match else ""
 
-        for item in items:
-            safe_json({"meta": self.to_meta(item)}, META_DIR / f"{item.id.replace(':', '_')}.json")
+    def extract_trailer_url(self, raw_html: str) -> str:
+        text = raw_html.replace("\\/", "/")
+        match = re.search(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)[^\"'<>\s]+", text)
+        if not match:
+            return ""
+        return match.group(0)
 
-        self.write_index(items)
-        self.write_manifest()
+    def parse_movie(self, film_id: int, url: str, html: str) -> Optional[Movie]:
+        soup = BeautifulSoup(html, "lxml")
+        raw_html = str(soup)
+        text_blob = soup.get_text("\n", strip=True)
 
-    def is_dvd_item(self, meta: dict) -> bool:
-        text = " ".join(
-            str(meta.get(k, "")) for k in ("name", "description", "releaseInfo")
-        ).lower()
-        return "dvd" in text
+        title = self.extract_title(soup)
+        if not title:
+            return None
 
-    def to_meta_preview(self, item: FilmEntry) -> dict:
-        meta = {
-            "id": item.id,
-            "type": item.type,
-            "name": item.name,
-            "poster": item.poster,
+        year_match = re.search(r"(?:Film r[ée]alis[ée]? en|Film DTV,?)\s*<strong>(\d{4})</strong>", raw_html, re.IGNORECASE)
+        if not year_match:
+            year_match = re.search(r"\b(19\d{2}|20\d{2})\b", text_blob)
+        year = int(year_match.group(1)) if year_match else None
+
+        dvd_dt, bluray_dt, release_text = self.extract_release_dates(soup, raw_html)
+        physical_available = bool(dvd_dt or bluray_dt)
+
+        release_type = ""
+        if dvd_dt and bluray_dt:
+            release_type = "dvd+bluray"
+        elif bluray_dt:
+            release_type = "bluray"
+        elif dvd_dt:
+            release_type = "dvd"
+
+        released_dt: Optional[datetime] = None
+        if dvd_dt and bluray_dt:
+            released_dt = min(dvd_dt, bluray_dt)
+        else:
+            released_dt = dvd_dt or bluray_dt
+
+        rating, voters = self.extract_rating(soup)
+
+        movie = Movie(
+            id=f"gr-film-{film_id}",
+            source_url=url,
+            guide_rapide_id=film_id,
+            title=title,
+            year=year,
+            director=self.extract_directors(soup),
+            actors=self.extract_actors(soup),
+            runtime=self.extract_runtime(soup, text_blob),
+            genres=self.extract_genres(soup, text_blob),
+            synopsis=self.extract_synopsis(soup, raw_html),
+            rating=rating,
+            voters=voters,
+            poster=self.extract_poster(soup, url),
+            trailer_url=self.extract_trailer_url(raw_html),
+            imdb_id=self.extract_imdb_id(soup),
+            dvd_release_date=dt_to_iso(dvd_dt),
+            bluray_release_date=dt_to_iso(bluray_dt),
+            release_type=release_type,
+            release_text=release_text,
+            released=dt_to_iso(released_dt),
+            physical_available=physical_available,
+            checked_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return movie
+
+    def load_movies(self, discovered_urls: dict[int, str]) -> list[Movie]:
+        movies: dict[int, Movie] = {}
+        fetched_this_run = 0
+
+        # Keep known cached movies even if not rediscovered this run.
+        for movie_file in MOVIE_CACHE_DIR.glob("film-*.json"):
+            payload = read_json(movie_file, default=None)
+            if not isinstance(payload, dict):
+                continue
+            try:
+                cached = Movie(**payload)
+            except TypeError:
+                continue
+            movies[cached.guide_rapide_id] = cached
+
+        for film_id, url in sorted(discovered_urls.items(), reverse=True):
+            cached = self.read_cached_movie(film_id)
+            if cached and not self.should_recheck_movie(film_id):
+                movies[film_id] = cached
+                continue
+
+            if fetched_this_run >= MAX_MOVIE_FETCH_PER_RUN:
+                if cached:
+                    movies[film_id] = cached
+                continue
+
+            html = self.fetch_url(url)
+            if not html:
+                if cached:
+                    movies[film_id] = cached
+                continue
+
+            fetched_this_run += 1
+            if fetched_this_run % 25 == 0:
+                print(f"Movie fetch progress: {fetched_this_run}/{MAX_MOVIE_FETCH_PER_RUN}")
+
+            parsed = self.parse_movie(film_id, url, html)
+            if not parsed:
+                if cached:
+                    movies[film_id] = cached
+                continue
+
+            self.write_cached_movie(parsed)
+            self.state["movies"][str(film_id)] = {
+                "checked_at": parsed.checked_at,
+                "source_url": url,
+            }
+            movies[film_id] = parsed
+
+        print(f"Movies fetched this run: {fetched_this_run}")
+
+        return list(movies.values())
+
+    def release_info_text(self, movie: Movie) -> str:
+        parts = []
+        if movie.dvd_release_date:
+            parts.append(f"DVD: {movie.dvd_release_date}")
+        if movie.bluray_release_date:
+            parts.append(f"Blu-ray: {movie.bluray_release_date}")
+        if movie.year:
+            parts.append(f"Production: {movie.year}")
+        return " | ".join(parts)
+
+    def to_meta_preview(self, movie: Movie) -> dict:
+        preview = {
+            "id": movie.id,
+            "type": "movie",
+            "name": movie.title,
+            "poster": movie.poster,
+            "releaseInfo": self.release_info_text(movie),
         }
-        if item.genres:
-            meta["genres"] = item.genres
-        if item.releaseInfo:
-            meta["releaseInfo"] = item.releaseInfo
-        if item.description:
-            meta["description"] = item.description[:500]
-        if item.imdbRating:
-            meta["imdbRating"] = item.imdbRating
+        if movie.released:
+            preview["released"] = movie.released
+        if movie.genres:
+            preview["genres"] = movie.genres
+        if movie.rating:
+            preview["imdbRating"] = movie.rating
+        if movie.synopsis:
+            preview["description"] = movie.synopsis[:500]
+        return preview
+
+    def to_meta(self, movie: Movie) -> dict:
+        description_parts = []
+        if movie.synopsis:
+            description_parts.append(movie.synopsis)
+        if movie.release_text:
+            description_parts.append(movie.release_text)
+
+        meta = {
+            "id": movie.id,
+            "type": "movie",
+            "name": movie.title,
+            "poster": movie.poster,
+            "background": movie.poster,
+            "description": "\n\n".join(description_parts).strip(),
+            "genres": movie.genres,
+            "director": movie.director,
+            "cast": movie.actors,
+            "releaseInfo": self.release_info_text(movie),
+            "country": "France",
+            "language": "fr",
+            "logo": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
+            "links": [{"name": "Guide-Rapide", "category": "source", "url": movie.source_url}],
+        }
+
+        if movie.released:
+            meta["released"] = movie.released
+        if movie.rating:
+            meta["imdbRating"] = movie.rating
+        if movie.runtime:
+            meta["runtime"] = movie.runtime
+        if movie.voters is not None:
+            meta["votes"] = str(movie.voters)
+        if movie.imdb_id:
+            meta["imdb_id"] = movie.imdb_id
+            meta["links"].append(
+                {
+                    "name": "IMDb",
+                    "category": "imdb",
+                    "url": f"https://www.imdb.com/title/{movie.imdb_id}/",
+                }
+            )
+        if movie.trailer_url:
+            meta["trailers"] = [{"source": "youtube", "type": "Trailer", "url": movie.trailer_url}]
+
         return meta
 
-    def to_meta(self, item: FilmEntry) -> dict:
-        meta = self.to_meta_preview(item)
-        if item.poster:
-            meta["poster"] = item.poster
-        if item.director:
-            meta["director"] = item.director
-        if item.cast:
-            meta["cast"] = item.cast
-        if item.released:
-            meta["released"] = item.released
-        meta["country"] = item.country
-        meta["language"] = item.language
-        meta["background"] = item.poster
-        meta["logo"] = "https://www.guide-rapide.com/favicon.ico"
-        meta["links"] = [{"name": "Source", "category": "source", "url": item.sourceUrl}]
-        return meta
+    def write_catalog(self, catalog_id: str, movies: list[Movie]) -> None:
+        payload = {"metas": [self.to_meta_preview(m) for m in movies]}
+        write_json(CATALOG_DIR / f"{catalog_id}.json", payload)
 
-    def write_manifest(self) -> None:
+    def build_catalogs(self, movies: list[Movie]) -> tuple[list[dict], dict[str, list[Movie]]]:
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        physical_movies = [m for m in movies if m.physical_available]
+        physical_past = [m for m in physical_movies if m.released and m.released <= today]
+        physical_future = [m for m in physical_movies if m.released and m.released > today]
+
+        physical_past.sort(key=lambda m: m.released, reverse=True)
+        physical_future.sort(key=lambda m: m.released)
+
+        dvd_past = [m for m in physical_past if m.dvd_release_date]
+        bluray_past = [m for m in physical_past if m.bluray_release_date]
+        both_past = [m for m in physical_past if m.dvd_release_date and m.bluray_release_date]
+
+        catalog_defs = [
+            {"type": "movie", "id": "dvd-france-nouveautes", "name": "DVD France - Nouveautes"},
+            {"type": "movie", "id": "dvd-bluray-france", "name": "DVD + Blu-ray France"},
+            {"type": "movie", "id": "bluray-france", "name": "Blu-ray France"},
+            {"type": "movie", "id": "toutes-sorties-physiques", "name": "Toutes les sorties physiques"},
+        ]
+
+        catalogs: dict[str, list[Movie]] = {
+            "dvd-france-nouveautes": dvd_past,
+            "dvd-bluray-france": both_past,
+            "bluray-france": bluray_past,
+            "toutes-sorties-physiques": physical_past,
+        }
+
+        if physical_future:
+            catalog_defs.append(
+                {"type": "movie", "id": "prochaines-sorties", "name": "Prochaines sorties"}
+            )
+            catalogs["prochaines-sorties"] = physical_future
+
+        genre_counter: Counter[str] = Counter()
+        for movie in physical_past:
+            for genre in movie.genres:
+                genre_counter[genre] += 1
+
+        genre_catalog_count = 0
+        for genre, count in genre_counter.most_common(12):
+            if count < 10:
+                continue
+            slug = slugify(genre)
+            catalog_id = f"genre-{slug}"
+            catalog_name = f"Genre - {genre}"
+            catalogs[catalog_id] = [m for m in physical_past if genre in m.genres]
+            catalog_defs.append({"type": "movie", "id": catalog_id, "name": catalog_name})
+            genre_catalog_count += 1
+            if genre_catalog_count >= 8:
+                break
+
+        return catalog_defs, catalogs
+
+    def clean_output_dirs(self) -> None:
+        CATALOG_DIR.mkdir(parents=True, exist_ok=True)
+        META_DIR.mkdir(parents=True, exist_ok=True)
+
+        for old in CATALOG_DIR.glob("*.json"):
+            old.unlink()
+        for old in META_DIR.glob("*.json"):
+            old.unlink()
+
+    def write_manifest(self, catalogs: list[dict]) -> None:
         manifest = {
             "id": "org.guiderapide.nuvio",
-            "version": "1.0.0",
-            "name": "Guide Rapide",
-            "description": "Guide Rapide French DVD and Blu-ray release catalog",
-            "logo": "https://www.guide-rapide.com/favicon.ico",
-            "background": "https://www.guide-rapide.com/favicon.ico",
+            "version": datetime.now(timezone.utc).strftime("%Y.%m.%d"),
+            "name": "Guide-Rapide France DVD/Blu-ray",
+            "description": "Catalogues francais de sorties DVD et Blu-ray issus de Guide-Rapide.",
+            "logo": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
+            "background": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
             "resources": [
                 "catalog",
-                {
-                    "name": "meta",
-                    "types": ["movie"],
-                    "idPrefixes": ["gr:"]
-                }
+                {"name": "meta", "types": ["movie"], "idPrefixes": ["gr-film-"]},
             ],
             "types": ["movie"],
-            "catalogs": [
-                {"type": "movie", "id": "all-releases", "name": "Guide Rapide - All releases"},
-                {"type": "movie", "id": "dvd-france", "name": "Guide Rapide - DVD France"},
-            ],
+            "catalogs": catalogs,
         }
-        safe_json(manifest, OUTPUT_DIR / "manifest.json")
+        write_json(OUTPUT_DIR / "manifest.json", manifest)
 
-    def write_index(self, items: list[FilmEntry]) -> None:
+    def write_index(self, total_movies: int, discovered_count: int) -> None:
         html = [
             "<!doctype html>",
-            "<html lang=\"en\">",
+            '<html lang="fr">',
             "<head>",
-            "<meta charset=\"utf-8\">",
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
-            "<title>Guide Rapide addon</title>",
-            "<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.5}code{background:#f3f3f3;padding:2px 5px;border-radius:4px}</style>",
+            '<meta charset="utf-8">',
+            '<meta name="viewport" content="width=device-width, initial-scale=1">',
+            "<title>Guide-Rapide Nuvio Catalog</title>",
+            "<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:32px auto;padding:0 16px;line-height:1.45}code{background:#f3f3f3;padding:2px 6px;border-radius:4px}</style>",
             "</head>",
             "<body>",
-            "<h1>Guide Rapide addon</h1>",
-            "<p>Install this addon in Nuvio using the manifest at <code>/manifest.json</code>.</p>",
-            f"<p>Items collected: <strong>{len(items)}</strong></p>",
+            "<h1>Guide-Rapide Nuvio Catalog</h1>",
+            "<p>Manifest URL: <code>manifest.json</code></p>",
+            f"<p>Films physiques indexes: <strong>{total_movies}</strong></p>",
+            f"<p>Liens films decouverts pendant le crawl: <strong>{discovered_count}</strong></p>",
             "<ul>",
-            "<li><a href=\"manifest.json\">manifest.json</a></li>",
-            "<li><a href=\"catalog/movie/all-releases.json\">all-releases catalog</a></li>",
-            "<li><a href=\"catalog/movie/dvd-france.json\">dvd-france catalog</a></li>",
+            '<li><a href="manifest.json">manifest.json</a></li>',
+            '<li><a href="catalog/movie/toutes-sorties-physiques.json">Toutes les sorties physiques</a></li>',
+            '<li><a href="catalog/movie/dvd-france-nouveautes.json">DVD France - Nouveautes</a></li>',
             "</ul>",
-            "</body></html>",
+            "</body>",
+            "</html>",
         ]
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         (OUTPUT_DIR / "index.html").write_text("\n".join(html), encoding="utf-8")
 
+    def persist_state(self) -> None:
+        self.state["last_run"] = datetime.now(timezone.utc).isoformat()
+        write_json(STATE_FILE, self.state)
+
+    def build(self) -> None:
+        discovered_urls = self.discover_film_urls()
+        movies = self.load_movies(discovered_urls)
+
+        physical_movies = [m for m in movies if m.physical_available]
+        physical_movies.sort(key=lambda m: (m.released, m.guide_rapide_id), reverse=True)
+
+        catalog_defs, catalogs = self.build_catalogs(physical_movies)
+
+        self.clean_output_dirs()
+        for catalog_id, entries in catalogs.items():
+            self.write_catalog(catalog_id, entries)
+
+        for movie in physical_movies:
+            write_json(META_DIR / f"{movie.id}.json", {"meta": self.to_meta(movie)})
+
+        self.write_manifest(catalog_defs)
+        self.write_index(total_movies=len(physical_movies), discovered_count=len(discovered_urls))
+        self.persist_state()
+
+        print(f"Discovered movie links: {len(discovered_urls)}")
+        print(f"Physical movies exported: {len(physical_movies)}")
+        print(f"Catalogs exported: {len(catalog_defs)}")
+
 
 def main() -> int:
-    crawler = Crawler()
-    crawler.build()
-    print(f"Collected {len(crawler.entries)} items")
+    builder = GuideRapideBuilder()
+    builder.build()
     return 0
 
 
