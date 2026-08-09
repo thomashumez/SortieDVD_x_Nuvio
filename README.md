@@ -79,6 +79,12 @@ Provider options:
 - `GR_METADATA_PROVIDER=tmdb`: force TMDB-only behavior
 - `GR_METADATA_PROVIDER=imdb`: disable OMDb and keep IMDb-only behavior
 
+Metadata backfill mode:
+
+- `GR_METADATA_BACKFILL_MODE=off`: disable metadata backfill pass
+- `GR_METADATA_BACKFILL_MODE=smart` (default): backfill only missing poster/trailer
+- `GR_METADATA_BACKFILL_MODE=deep`: recheck all cached IMDb items (up to `GR_MAX_METADATA_API_LOOKUPS_PER_RUN`)
+
 Robustness switches:
 
 - `GR_ENABLE_IMDB_SUGGESTION_FALLBACK=false` disables unofficial IMDb suggestion endpoint fallback
@@ -122,6 +128,7 @@ Manual workflow options are intentionally minimal:
 - `discovery_mode`: `auto` / `full` / `incremental`
 - `full_archive_pages`: full-mode archive discovery cap (default `4000`)
 - `full_movie_fetch`: full-mode movie processing cap (default `2500`)
+- `metadata_backfill_mode`: `off` / `smart` / `deep`
 - `wipe_cache`: force cache bypass and a fresh full bootstrap
 
 Pipeline:

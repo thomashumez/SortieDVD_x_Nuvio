@@ -48,7 +48,9 @@ COUNTRY_BACKFILL_WINDOW_DAYS = int(os.getenv("GR_COUNTRY_BACKFILL_WINDOW_DAYS", 
 MAX_COUNTRY_BACKFILL_PER_RUN = int(os.getenv("GR_MAX_COUNTRY_BACKFILL_PER_RUN", "120"))
 IMDB_SUGGESTION_API = "https://v3.sg.media-imdb.com/suggestion"
 MAX_IMDB_POSTER_REFRESH_PER_RUN = int(os.getenv("GR_MAX_IMDB_POSTER_REFRESH_PER_RUN", "80"))
+MAX_METADATA_API_LOOKUPS_PER_RUN = int(os.getenv("GR_MAX_METADATA_API_LOOKUPS_PER_RUN", "120"))
 METADATA_PROVIDER = os.getenv("GR_METADATA_PROVIDER", "auto").strip().lower()
+METADATA_BACKFILL_MODE = os.getenv("GR_METADATA_BACKFILL_MODE", "smart").strip().lower()
 OMDB_API_KEY = os.getenv("GR_OMDB_API_KEY", "").strip()
 OMDB_API_KEYS_RAW = os.getenv("GR_OMDB_API_KEYS", "").strip()
 OMDB_API_URL = "https://www.omdbapi.com/"
@@ -288,6 +290,7 @@ class GuideRapideBuilder:
             self.imdb_cache = {}
 
         self.metadata_provider = METADATA_PROVIDER if METADATA_PROVIDER in {"auto", "imdb", "omdb", "tmdb"} else "auto"
+        self.metadata_backfill_mode = METADATA_BACKFILL_MODE if METADATA_BACKFILL_MODE in {"off", "smart", "deep"} else "smart"
         self.omdb_api_keys = self.build_omdb_key_pool()
 
     def elapsed(self) -> str:
@@ -311,6 +314,28 @@ class GuideRapideBuilder:
             return response.text
         except requests.RequestException:
             return None
+
+    def merge_metadata(self, primary: ImdbMetadata, secondary: ImdbMetadata) -> ImdbMetadata:
+        return ImdbMetadata(
+            title=primary.title or secondary.title,
+            year=primary.year if primary.year is not None else secondary.year,
+            director=primary.director or secondary.director,
+            actors=primary.actors or secondary.actors,
+            poster=primary.poster or secondary.poster,
+            description=primary.description or secondary.description,
+            genres=primary.genres or secondary.genres,
+            rating=primary.rating or secondary.rating,
+            voters=primary.voters if primary.voters is not None else secondary.voters,
+            runtime=primary.runtime or secondary.runtime,
+            trailer_url=primary.trailer_url or secondary.trailer_url,
+            writers=primary.writers or secondary.writers,
+            production_companies=primary.production_companies or secondary.production_companies,
+            critic_ratings=primary.critic_ratings or secondary.critic_ratings,
+            content_rating=primary.content_rating or secondary.content_rating,
+            box_office=primary.box_office or secondary.box_office,
+            awards=primary.awards or secondary.awards,
+            metascore=primary.metascore or secondary.metascore,
+        )
 
     def fetch_json(self, url: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
         self.throttle()
@@ -374,14 +399,91 @@ class GuideRapideBuilder:
             return False
         return bool(TMDB_API_KEY)
 
-    def fetch_tmdb_json(self, path: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
+    def fetch_tmdb_json(
+        self,
+        path: str,
+        params: Optional[dict[str, str]] = None,
+        include_default_language: bool = True,
+    ) -> Optional[dict]:
         if not self.should_use_tmdb():
             return None
 
-        query = {"api_key": TMDB_API_KEY, "language": "fr-FR"}
+        query = {"api_key": TMDB_API_KEY}
+        if include_default_language:
+            query["language"] = "fr-FR"
         if params:
             query.update(params)
         return self.fetch_json(f"{TMDB_API_URL}{path}", params=query)
+
+    def pick_tmdb_trailer_url(self, results: list[dict]) -> str:
+        ranked: list[tuple[int, str]] = []
+        for video in results:
+            if not isinstance(video, dict):
+                continue
+            if normalize_text(str(video.get("site") or "")).lower() != "youtube":
+                continue
+
+            key = normalize_text(str(video.get("key") or ""))
+            if not key:
+                continue
+
+            kind = normalize_text(str(video.get("type") or "")).lower()
+            if kind not in {"trailer", "teaser"}:
+                continue
+
+            name = normalize_text(str(video.get("name") or "")).lower()
+            official = bool(video.get("official"))
+            score = 0
+            if kind == "trailer":
+                score += 100
+            if official:
+                score += 30
+            if "official" in name:
+                score += 10
+            if "trailer" in name:
+                score += 5
+
+            ranked.append((score, f"https://www.youtube.com/watch?v={key}"))
+
+        if not ranked:
+            return ""
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1]
+
+    def resolve_tmdb_trailer_url(self, movie_id: int, seed_results: Optional[list[dict]] = None) -> str:
+        # Try trailers in preferred language first (fr-FR), then widen to en-US and no language.
+        if seed_results:
+            url = self.pick_tmdb_trailer_url(seed_results)
+            if url:
+                return url
+
+        for lang in ("en-US", ""):
+            params: dict[str, str] = {}
+            include_default_language = False
+            if lang:
+                params["language"] = lang
+            videos_payload = self.fetch_tmdb_json(
+                f"/movie/{movie_id}/videos",
+                params=params,
+                include_default_language=include_default_language,
+            )
+            if not isinstance(videos_payload, dict):
+                continue
+            results = videos_payload.get("results")
+            if not isinstance(results, list):
+                continue
+            url = self.pick_tmdb_trailer_url(results)
+            if url:
+                return url
+
+        return ""
+
+    def youtube_search_trailer_url(self, imdb_id: str, title: str) -> str:
+        query_parts = [imdb_id, title, "official trailer"]
+        query = normalize_text(" ".join(x for x in query_parts if x))
+        if not query:
+            return ""
+        return f"https://www.youtube.com/results?search_query={quote(query)}"
 
     def tmdb_poster_url(self, poster_path: str) -> str:
         normalized = normalize_text(poster_path)
@@ -455,24 +557,13 @@ class GuideRapideBuilder:
                 if name:
                     production_companies.append(name)
 
-        trailer_url = ""
-        videos = details.get("videos")
-        if isinstance(videos, dict):
-            results = videos.get("results")
-            if isinstance(results, list):
-                for video in results:
-                    if not isinstance(video, dict):
-                        continue
-                    if normalize_text(str(video.get("site") or "")).lower() != "youtube":
-                        continue
-                    kind = normalize_text(str(video.get("type") or "")).lower()
-                    if kind not in {"trailer", "teaser"}:
-                        continue
-                    key = normalize_text(str(video.get("key") or ""))
-                    if not key:
-                        continue
-                    trailer_url = f"https://www.youtube.com/watch?v={key}"
-                    break
+        trailer_url = normalize_text(str(details.get("_resolved_trailer_url") or ""))
+        if not trailer_url:
+            videos = details.get("videos")
+            if isinstance(videos, dict):
+                results = videos.get("results")
+                if isinstance(results, list):
+                    trailer_url = self.pick_tmdb_trailer_url(results)
 
         rating = ""
         vote_average = details.get("vote_average")
@@ -737,7 +828,20 @@ class GuideRapideBuilder:
         if not isinstance(details, dict):
             return ImdbMetadata()
 
+        seed_results = None
+        videos = details.get("videos")
+        if isinstance(videos, dict):
+            maybe_results = videos.get("results")
+            if isinstance(maybe_results, list):
+                seed_results = maybe_results
+
+        trailer_url = self.resolve_tmdb_trailer_url(movie_id, seed_results=seed_results)
+        if trailer_url:
+            details["_resolved_trailer_url"] = trailer_url
+
         meta = self.tmdb_payload_to_metadata(details)
+        if not meta.trailer_url:
+            meta.trailer_url = self.youtube_search_trailer_url(imdb_id, meta.title)
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
 
@@ -1385,40 +1489,31 @@ class GuideRapideBuilder:
         self.apply_imdb_metadata(movie)
         return movie
 
-    def fetch_imdb_metadata(self, imdb_id: str) -> ImdbMetadata:
+    def fetch_imdb_metadata(self, imdb_id: str, allow_backfill: bool = True) -> ImdbMetadata:
         if not imdb_id:
             return ImdbMetadata()
 
         cached = self.imdb_cache.get(imdb_id)
         if isinstance(cached, dict):
             try:
-                return ImdbMetadata(**cached)
+                cached_meta = ImdbMetadata(**cached)
+                if not allow_backfill:
+                    return cached_meta
+                needs_tmdb_backfill = not normalize_text(cached_meta.trailer_url) or not cached_meta.production_companies
+                if not needs_tmdb_backfill:
+                    return cached_meta
+
+                tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
+                merged_cached = self.merge_metadata(cached_meta, tmdb_meta)
+                self.imdb_cache[imdb_id] = asdict(merged_cached)
+                return merged_cached
             except TypeError:
                 pass
 
         omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
         tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
 
-        merged = ImdbMetadata(
-            title=omdb_meta.title or tmdb_meta.title,
-            year=omdb_meta.year if omdb_meta.year is not None else tmdb_meta.year,
-            director=omdb_meta.director or tmdb_meta.director,
-            actors=omdb_meta.actors or tmdb_meta.actors,
-            poster=omdb_meta.poster or tmdb_meta.poster,
-            description=omdb_meta.description or tmdb_meta.description,
-            genres=omdb_meta.genres or tmdb_meta.genres,
-            rating=omdb_meta.rating or tmdb_meta.rating,
-            voters=omdb_meta.voters if omdb_meta.voters is not None else tmdb_meta.voters,
-            runtime=omdb_meta.runtime or tmdb_meta.runtime,
-            trailer_url=omdb_meta.trailer_url or tmdb_meta.trailer_url,
-            writers=omdb_meta.writers or tmdb_meta.writers,
-            production_companies=omdb_meta.production_companies or tmdb_meta.production_companies,
-            critic_ratings=omdb_meta.critic_ratings or tmdb_meta.critic_ratings,
-            content_rating=omdb_meta.content_rating or tmdb_meta.content_rating,
-            box_office=omdb_meta.box_office or tmdb_meta.box_office,
-            awards=omdb_meta.awards or tmdb_meta.awards,
-            metascore=omdb_meta.metascore or tmdb_meta.metascore,
-        )
+        merged = self.merge_metadata(omdb_meta, tmdb_meta)
 
         if merged.title or merged.poster or merged.description or merged.trailer_url:
             self.imdb_cache[imdb_id] = asdict(merged)
@@ -1580,7 +1675,7 @@ class GuideRapideBuilder:
         if not allow_network and not self.has_cached_imdb_metadata(movie.imdb_id):
             return False
 
-        imdb = self.fetch_imdb_metadata(movie.imdb_id)
+        imdb = self.fetch_imdb_metadata(movie.imdb_id, allow_backfill=allow_network)
         changed = False
 
         if imdb.title and movie.title != imdb.title:
@@ -1652,32 +1747,55 @@ class GuideRapideBuilder:
             return True
         return False
 
-    def refresh_catalog_posters(self, catalogs: dict[str, list[Movie]]) -> int:
+    def should_refresh_trailer_from_api(self, movie: Movie) -> bool:
+        if not movie.imdb_id:
+            return False
+        return not normalize_text(movie.trailer_url)
+
+    def should_backfill_metadata(self, movie: Movie) -> bool:
+        if not movie.imdb_id:
+            return False
+
+        if self.metadata_backfill_mode == "off":
+            return False
+
+        if self.metadata_backfill_mode == "deep":
+            return True
+
+        # smart mode: refresh only when key high-value fields are missing.
+        needs_poster = self.should_refresh_poster_from_imdb(movie)
+        needs_trailer = self.should_refresh_trailer_from_api(movie)
+        return needs_poster or needs_trailer
+
+    def refresh_catalog_posters(self, catalogs: dict[str, list[Movie]]) -> tuple[int, int]:
         refreshed = 0
+        api_lookups = 0
         seen_ids: set[str] = set()
+
+        if self.metadata_backfill_mode == "off":
+            return refreshed, api_lookups
 
         for entries in catalogs.values():
             for movie in entries:
                 if refreshed >= MAX_IMDB_POSTER_REFRESH_PER_RUN:
-                    return refreshed
+                    return refreshed, api_lookups
+                if api_lookups >= MAX_METADATA_API_LOOKUPS_PER_RUN:
+                    return refreshed, api_lookups
                 if movie.id in seen_ids:
                     continue
                 seen_ids.add(movie.id)
 
                 movie.poster = normalize_image_url(movie.poster)
-                if not self.should_refresh_poster_from_imdb(movie):
+                if not self.should_backfill_metadata(movie):
                     continue
 
-                imdb = self.fetch_imdb_metadata(movie.imdb_id)
-                if not imdb.poster:
-                    continue
-
-                if movie.poster != imdb.poster:
-                    movie.poster = imdb.poster
+                api_lookups += 1
+                changed = self.apply_imdb_metadata(movie, allow_network=True)
+                if changed:
                     self.write_cached_movie(movie)
                     refreshed += 1
 
-        return refreshed
+        return refreshed, api_lookups
 
     def needs_country_backfill(self, movie: Movie) -> bool:
         if movie.production_countries:
@@ -2021,7 +2139,7 @@ class GuideRapideBuilder:
         physical_movies = list(deduped_by_id.values())
 
         catalog_defs, catalogs = self.build_catalogs(physical_movies)
-        refreshed_posters = self.refresh_catalog_posters(catalogs)
+        refreshed_posters, metadata_api_lookups = self.refresh_catalog_posters(catalogs)
 
         self.clean_output_dirs()
         for catalog_id, entries in catalogs.items():
@@ -2038,6 +2156,7 @@ class GuideRapideBuilder:
         log(f"[{self.elapsed()}] Physical movies exported: {len(physical_movies)}")
         log(f"[{self.elapsed()}] Catalogs exported: {len(catalog_defs)}")
         log(f"[{self.elapsed()}] Catalog posters refreshed from IMDb: {refreshed_posters}")
+        log(f"[{self.elapsed()}] Metadata API lookups for poster/trailer backfill: {metadata_api_lookups}")
 
 
 def main() -> int:
