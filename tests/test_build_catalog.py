@@ -57,6 +57,11 @@ class BuildCatalogTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed.tzinfo, build_catalog.timezone.utc)
 
+    def test_french_release_date_parser_has_month_mapping(self) -> None:
+        parsed = build_catalog.parse_french_date("27 mai 2026")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.date().isoformat(), "2026-05-27")
+
     def test_publish_replaces_previous_site_as_a_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

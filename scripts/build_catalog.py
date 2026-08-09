@@ -8,7 +8,7 @@ if __package__ in {None, ""}:
 
 from scripts.catalog.builder import GuideRapideBuilder
 from scripts.catalog.config import BuildConfig, MOVIE_CACHE_DIR, OUTPUT_DIR
-from scripts.catalog.utils import parse_timestamp, read_json, write_json
+from scripts.catalog.utils import parse_french_date, parse_timestamp, read_json, write_json
 from datetime import timezone
 
 

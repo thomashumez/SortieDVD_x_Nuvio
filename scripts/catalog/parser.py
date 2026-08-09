@@ -7,7 +7,6 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from .config import MONTHS
 from .models import Movie
 from .utils import (
     dt_to_iso,

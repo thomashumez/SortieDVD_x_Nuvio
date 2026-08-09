@@ -10,6 +10,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .config import MONTHS
+
+
 def normalize_text(value: str) -> str:
     return " ".join(value.split()).strip()
 
