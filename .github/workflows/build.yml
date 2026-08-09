@@ -49,7 +49,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build static site
-        run: python scripts/build_catalog.py
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python -u scripts/build_catalog.py
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

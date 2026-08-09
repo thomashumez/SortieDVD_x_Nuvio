@@ -175,8 +175,13 @@ def split_list(value: str) -> list[str]:
     return [x for x in parts if x]
 
 
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
 class GuideRapideBuilder:
     def __init__(self) -> None:
+        self.start_ts = time.monotonic()
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         retries = Retry(
@@ -198,6 +203,11 @@ class GuideRapideBuilder:
             self.state = {"movies": {}, "last_run": ""}
         if not isinstance(self.state.get("movies"), dict):
             self.state["movies"] = {}
+
+    def elapsed(self) -> str:
+        seconds = int(time.monotonic() - self.start_ts)
+        mins, sec = divmod(seconds, 60)
+        return f"{mins:02d}:{sec:02d}"
 
     def throttle(self) -> None:
         now = time.time()
@@ -301,6 +311,10 @@ class GuideRapideBuilder:
         return int(match.group(1))
 
     def discover_film_urls(self) -> dict[int, str]:
+        log(
+            f"[{self.elapsed()}] Discovery start: max_archive_pages={MAX_ARCHIVE_PAGES}, "
+            f"max_movie_fetch_per_run={MAX_MOVIE_FETCH_PER_RUN}"
+        )
         queue = deque(self.build_seed_urls())
         visited: set[str] = set()
         film_urls: dict[int, str] = {}
@@ -337,8 +351,13 @@ class GuideRapideBuilder:
                 if self.is_archive_like(full_url) and full_url not in visited:
                     queue.append(full_url)
 
-            if processed % 100 == 0:
-                print(f"Discovery progress: {processed} pages, {len(film_urls)} movie links")
+            if processed % 25 == 0:
+                log(
+                    f"[{self.elapsed()}] Discovery progress: {processed}/{MAX_ARCHIVE_PAGES} pages, "
+                    f"{len(film_urls)} movie links"
+                )
+
+        log(f"[{self.elapsed()}] Discovery done: {len(film_urls)} movie links")
 
         return film_urls
 
@@ -659,6 +678,10 @@ class GuideRapideBuilder:
     def load_movies(self, discovered_urls: dict[int, str]) -> list[Movie]:
         movies: dict[int, Movie] = {}
         fetched_this_run = 0
+        stale_or_new = 0
+        skipped_due_to_cap = 0
+
+        log(f"[{self.elapsed()}] Movie phase start: discovered_urls={len(discovered_urls)}")
 
         # Keep known cached movies even if not rediscovered this run.
         for movie_file in MOVIE_CACHE_DIR.glob("film-*.json"):
@@ -677,9 +700,12 @@ class GuideRapideBuilder:
                 movies[film_id] = cached
                 continue
 
+            stale_or_new += 1
+
             if fetched_this_run >= MAX_MOVIE_FETCH_PER_RUN:
                 if cached:
                     movies[film_id] = cached
+                skipped_due_to_cap += 1
                 continue
 
             html = self.fetch_url(url)
@@ -689,8 +715,11 @@ class GuideRapideBuilder:
                 continue
 
             fetched_this_run += 1
-            if fetched_this_run % 25 == 0:
-                print(f"Movie fetch progress: {fetched_this_run}/{MAX_MOVIE_FETCH_PER_RUN}")
+            if fetched_this_run % 10 == 0:
+                log(
+                    f"[{self.elapsed()}] Movie fetch progress: {fetched_this_run}/{MAX_MOVIE_FETCH_PER_RUN} "
+                    f"(candidates={stale_or_new}, capped_skips={skipped_due_to_cap})"
+                )
 
             parsed = self.parse_movie(film_id, url, html)
             if not parsed:
@@ -705,7 +734,10 @@ class GuideRapideBuilder:
             }
             movies[film_id] = parsed
 
-        print(f"Movies fetched this run: {fetched_this_run}")
+        log(
+            f"[{self.elapsed()}] Movie phase done: fetched={fetched_this_run}, "
+            f"candidates={stale_or_new}, capped_skips={skipped_due_to_cap}"
+        )
 
         return list(movies.values())
 
@@ -898,6 +930,7 @@ class GuideRapideBuilder:
         write_json(STATE_FILE, self.state)
 
     def build(self) -> None:
+        log(f"[{self.elapsed()}] Build started")
         discovered_urls = self.discover_film_urls()
         movies = self.load_movies(discovered_urls)
 
@@ -917,9 +950,9 @@ class GuideRapideBuilder:
         self.write_index(total_movies=len(physical_movies), discovered_count=len(discovered_urls))
         self.persist_state()
 
-        print(f"Discovered movie links: {len(discovered_urls)}")
-        print(f"Physical movies exported: {len(physical_movies)}")
-        print(f"Catalogs exported: {len(catalog_defs)}")
+        log(f"[{self.elapsed()}] Discovered movie links: {len(discovered_urls)}")
+        log(f"[{self.elapsed()}] Physical movies exported: {len(physical_movies)}")
+        log(f"[{self.elapsed()}] Catalogs exported: {len(catalog_defs)}")
 
 
 def main() -> int:
