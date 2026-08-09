@@ -57,7 +57,7 @@ Crawl strategy (default):
 Optional tuning for incremental daily runs:
 
 ```bash
-GR_DISCOVERY_MODE=incremental GR_INCREMENTAL_ARCHIVE_PAGES=850 GR_INCREMENTAL_MOVIE_FETCH_PER_RUN=320 python scripts/build_catalog.py
+GR_DISCOVERY_MODE=incremental GR_INCREMENTAL_ARCHIVE_PAGES=150 GR_INCREMENTAL_MOVIE_FETCH_PER_RUN=100 python scripts/build_catalog.py
 ```
 
 Then open `site/manifest.json` or `site/index.html`.
@@ -109,7 +109,9 @@ The workflow also restores `data/cache` using `actions/cache` to preserve crawl 
 
 Default run limits are intentionally conservative for daily automation:
 
-- `GR_MAX_ARCHIVE_PAGES` default: `850`
-- `GR_MAX_MOVIE_FETCH_PER_RUN` default: `320`
+- `GR_INCREMENTAL_ARCHIVE_PAGES` default: `150`
+- `GR_INCREMENTAL_MOVIE_FETCH_PER_RUN` default: `100`
+- `GR_FULL_ARCHIVE_PAGES` default: `4000`
+- `GR_FULL_MOVIE_FETCH_PER_RUN` default: `2500`
 
-This means the archive can be backfilled progressively across runs while still refreshing recent movies first.
+This keeps daily runs focused on recent surfaces while preserving a deeper full bootstrap/backfill mode when needed.

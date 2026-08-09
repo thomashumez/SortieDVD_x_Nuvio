@@ -100,11 +100,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Resolve build mode
+        if: steps.nightly_gate.outputs.should_run == 'true'
+        id: resolve_mode
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            discovery_mode="incremental"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            discovery_mode="${{ inputs.discovery_mode || 'auto' }}"
+          else
+            discovery_mode="auto"
+          fi
+
+          echo "discovery_mode=$discovery_mode" >> "$GITHUB_OUTPUT"
+          echo "Effective discovery mode: $discovery_mode"
+
       - name: Build static site
         if: steps.nightly_gate.outputs.should_run == 'true'
         env:
           PYTHONUNBUFFERED: "1"
-          GR_DISCOVERY_MODE: ${{ inputs.discovery_mode || 'auto' }}
+          GR_DISCOVERY_MODE: ${{ steps.resolve_mode.outputs.discovery_mode }}
           GR_FULL_ARCHIVE_PAGES: ${{ inputs.full_archive_pages || '4000' }}
           GR_FULL_MOVIE_FETCH_PER_RUN: ${{ inputs.full_movie_fetch || '2500' }}
         run: python -u scripts/build_catalog.py
