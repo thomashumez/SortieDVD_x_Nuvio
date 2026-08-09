@@ -9,7 +9,15 @@ This repository builds a fully static Nuvio/Stremio-compatible addon from public
 
 RSS is only used for discovery. DVD/Blu-ray release dates are parsed from movie pages.
 
-When Guide-Rapide fields are missing, the builder can enrich from IMDb (using the movie IMDb id):
+When Guide-Rapide fields are missing, the builder enriches metadata with this priority:
+
+1. OMDb API (if `GR_OMDB_API_KEY` is set)
+2. TMDB API (if `GR_TMDB_API_KEY` is set)
+3. IMDb fallback (optional)
+
+This is the most Nuvio-friendly setup because OMDb is IMDb-id centric (`tt...`) and returns stable movie metadata in one API call. TMDB adds robust API fallback without HTML parsing.
+
+Enrichment includes:
 
 - Poster fallback
 - Synopsis fallback
@@ -42,6 +50,26 @@ Optional tuning for a bigger one-time backfill:
 ```bash
 GR_DISCOVERY_MODE=full GR_FULL_ARCHIVE_PAGES=5000 GR_FULL_MOVIE_FETCH_PER_RUN=5000 python scripts/build_catalog.py
 ```
+
+Optional API-first metadata mode (recommended for Nuvio):
+
+```bash
+GR_METADATA_PROVIDER=auto GR_OMDB_API_KEY=your_key_here GR_TMDB_API_KEY=your_key_here python scripts/build_catalog.py
+```
+
+Provider options:
+
+- `GR_METADATA_PROVIDER=auto` (default): try OMDb, then TMDB, then optional IMDb fallback
+- `GR_METADATA_PROVIDER=omdb`: force OMDb-first behavior
+- `GR_METADATA_PROVIDER=tmdb`: force TMDB-only behavior
+- `GR_METADATA_PROVIDER=imdb`: disable OMDb and keep IMDb-only behavior
+
+Robustness switches:
+
+- `GR_ENABLE_IMDB_SUGGESTION_FALLBACK=false` disables unofficial IMDb suggestion endpoint fallback
+- `GR_ENABLE_IMDB_HTML_FALLBACK=false` disables IMDb HTML parsing fallback
+
+Recommended production values are both `false` to stay API-only.
 
 Optional tuning for production-country backfill used by the 12-month French/International catalogs:
 
@@ -91,6 +119,29 @@ Pipeline:
 1. In repository settings, ensure Actions are enabled.
 2. In repository settings, set Pages source to GitHub Actions.
 3. Ensure default branch is `main` (or adjust workflow `push.branches`).
+
+### Configure OMDb key securely (public repo)
+
+Do not commit your API key in files.
+Use a GitHub Actions secret:
+
+1. Repository Settings -> Secrets and variables -> Actions
+2. New repository secret
+3. Name: `OMDB_API_KEY`
+4. Value: your private OMDb API key
+
+The workflow already reads this secret via `secrets.OMDB_API_KEY`, so nightly runs continue to work without exposing the key in Git history.
+
+### Configure TMDB key securely (recommended)
+
+Use a second GitHub Actions secret:
+
+1. Repository Settings -> Secrets and variables -> Actions
+2. New repository secret
+3. Name: `TMDB_API_KEY`
+4. Value: your private TMDB API key
+
+The workflow reads `secrets.TMDB_API_KEY` to keep metadata resilient when OMDb has gaps.
 
 Final manifest URL format:
 

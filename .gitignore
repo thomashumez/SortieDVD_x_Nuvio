@@ -9,3 +9,7 @@ site/manifest.json
 
 # Scraper runtime cache
 data/cache/
+
+# Local secrets / environment files
+.env
+.env.*

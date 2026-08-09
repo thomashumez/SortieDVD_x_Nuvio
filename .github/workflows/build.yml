@@ -126,6 +126,11 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GR_DISCOVERY_MODE: ${{ steps.resolve_mode.outputs.discovery_mode }}
+          GR_METADATA_PROVIDER: "auto"
+          GR_OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
+          GR_TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          GR_ENABLE_IMDB_SUGGESTION_FALLBACK: "false"
+          GR_ENABLE_IMDB_HTML_FALLBACK: "false"
         run: python -u scripts/build_catalog.py
 
       - name: Setup Pages

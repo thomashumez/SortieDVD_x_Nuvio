@@ -48,6 +48,23 @@ COUNTRY_BACKFILL_WINDOW_DAYS = int(os.getenv("GR_COUNTRY_BACKFILL_WINDOW_DAYS", 
 MAX_COUNTRY_BACKFILL_PER_RUN = int(os.getenv("GR_MAX_COUNTRY_BACKFILL_PER_RUN", "120"))
 IMDB_SUGGESTION_API = "https://v3.sg.media-imdb.com/suggestion"
 MAX_IMDB_POSTER_REFRESH_PER_RUN = int(os.getenv("GR_MAX_IMDB_POSTER_REFRESH_PER_RUN", "80"))
+METADATA_PROVIDER = os.getenv("GR_METADATA_PROVIDER", "auto").strip().lower()
+OMDB_API_KEY = os.getenv("GR_OMDB_API_KEY", "").strip()
+OMDB_API_URL = "https://www.omdbapi.com/"
+TMDB_API_KEY = os.getenv("GR_TMDB_API_KEY", "").strip()
+TMDB_API_URL = "https://api.themoviedb.org/3"
+ENABLE_IMDB_SUGGESTION_FALLBACK = os.getenv("GR_ENABLE_IMDB_SUGGESTION_FALLBACK", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+ENABLE_IMDB_HTML_FALLBACK = os.getenv("GR_ENABLE_IMDB_HTML_FALLBACK", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 HEADERS = {
     "User-Agent": (
@@ -255,6 +272,8 @@ class GuideRapideBuilder:
         if not isinstance(self.imdb_cache, dict):
             self.imdb_cache = {}
 
+        self.metadata_provider = METADATA_PROVIDER if METADATA_PROVIDER in {"auto", "imdb", "omdb", "tmdb"} else "auto"
+
     def elapsed(self) -> str:
         seconds = int(time.monotonic() - self.start_ts)
         mins, sec = divmod(seconds, 60)
@@ -276,6 +295,323 @@ class GuideRapideBuilder:
             return response.text
         except requests.RequestException:
             return None
+
+    def fetch_json(self, url: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
+        self.throttle()
+        self.last_request_ts = time.time()
+        try:
+            response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, json.JSONDecodeError, ValueError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def should_use_omdb(self) -> bool:
+        if self.metadata_provider == "imdb":
+            return False
+        return bool(OMDB_API_KEY)
+
+    def should_use_tmdb(self) -> bool:
+        if self.metadata_provider == "imdb":
+            return False
+        if self.metadata_provider == "omdb":
+            return False
+        return bool(TMDB_API_KEY)
+
+    def fetch_tmdb_json(self, path: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
+        if not self.should_use_tmdb():
+            return None
+
+        query = {"api_key": TMDB_API_KEY, "language": "fr-FR"}
+        if params:
+            query.update(params)
+        return self.fetch_json(f"{TMDB_API_URL}{path}", params=query)
+
+    def tmdb_poster_url(self, poster_path: str) -> str:
+        normalized = normalize_text(poster_path)
+        if not normalized:
+            return ""
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            return normalized
+        return f"https://image.tmdb.org/t/p/w780{normalized}"
+
+    def tmdb_minutes_to_runtime(self, runtime_minutes: int) -> str:
+        if runtime_minutes <= 0:
+            return ""
+        hours, mins = divmod(runtime_minutes, 60)
+        if hours and mins:
+            return f"{hours}h{mins:02d}"
+        if hours:
+            return f"{hours}h"
+        return f"{mins}min"
+
+    def tmdb_payload_to_metadata(self, details: dict) -> ImdbMetadata:
+        title = normalize_text(str(details.get("title") or details.get("name") or ""))
+
+        year = None
+        release_date = normalize_text(str(details.get("release_date") or ""))
+        year_match = re.match(r"(\d{4})", release_date)
+        if year_match:
+            year = int(year_match.group(1))
+
+        directors: list[str] = []
+        actors: list[str] = []
+
+        credits = details.get("credits")
+        if isinstance(credits, dict):
+            crew = credits.get("crew")
+            if isinstance(crew, list):
+                for item in crew:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("job") or "").lower() != "director":
+                        continue
+                    name = normalize_text(str(item.get("name") or ""))
+                    if name:
+                        directors.append(name)
+
+            cast = credits.get("cast")
+            if isinstance(cast, list):
+                for item in cast[:10]:
+                    if not isinstance(item, dict):
+                        continue
+                    name = normalize_text(str(item.get("name") or ""))
+                    if name:
+                        actors.append(name)
+
+        genres: list[str] = []
+        genres_raw = details.get("genres")
+        if isinstance(genres_raw, list):
+            for item in genres_raw:
+                if not isinstance(item, dict):
+                    continue
+                name = normalize_text(str(item.get("name") or ""))
+                if name:
+                    genres.append(name)
+
+        rating = ""
+        vote_average = details.get("vote_average")
+        if isinstance(vote_average, (int, float)) and vote_average > 0:
+            rating = f"{vote_average:.1f}".rstrip("0").rstrip(".")
+
+        voters = None
+        vote_count = details.get("vote_count")
+        if isinstance(vote_count, int) and vote_count > 0:
+            voters = vote_count
+
+        runtime = ""
+        runtime_raw = details.get("runtime")
+        if isinstance(runtime_raw, int):
+            runtime = self.tmdb_minutes_to_runtime(runtime_raw)
+
+        poster = self.tmdb_poster_url(str(details.get("poster_path") or ""))
+
+        description = normalize_text(str(details.get("overview") or ""))
+
+        return ImdbMetadata(
+            title=title,
+            year=year,
+            director=list(dict.fromkeys(directors)) or None,
+            actors=list(dict.fromkeys(actors)) or None,
+            poster=poster,
+            description=description,
+            genres=list(dict.fromkeys(genres)) or None,
+            rating=rating,
+            voters=voters,
+            runtime=runtime,
+            trailer_url="",
+        )
+
+    def omdb_payload_to_metadata(self, payload: dict) -> ImdbMetadata:
+        title = normalize_text(str(payload.get("Title") or ""))
+
+        year = None
+        year_raw = normalize_text(str(payload.get("Year") or ""))
+        year_match = re.match(r"(\d{4})", year_raw)
+        if year_match:
+            year = int(year_match.group(1))
+
+        directors = split_list(str(payload.get("Director") or "").replace("N/A", ""))
+        actors = split_list(str(payload.get("Actors") or "").replace("N/A", ""))
+
+        genres = split_list(str(payload.get("Genre") or "").replace("N/A", ""))
+
+        rating = normalize_text(str(payload.get("imdbRating") or ""))
+        if rating == "N/A":
+            rating = ""
+
+        voters_raw = normalize_text(str(payload.get("imdbVotes") or ""))
+        voters = parse_int(voters_raw) if voters_raw and voters_raw != "N/A" else None
+
+        runtime = normalize_text(str(payload.get("Runtime") or ""))
+        if runtime == "N/A":
+            runtime = ""
+
+        poster = normalize_image_url(str(payload.get("Poster") or "").strip())
+        if poster == "N/A":
+            poster = ""
+
+        description = normalize_text(str(payload.get("Plot") or ""))
+        if description == "N/A":
+            description = ""
+
+        return ImdbMetadata(
+            title=title,
+            year=year,
+            director=directors or None,
+            actors=actors or None,
+            poster=poster,
+            description=description,
+            genres=genres or None,
+            rating=rating,
+            voters=voters,
+            runtime=runtime,
+            trailer_url="",
+        )
+
+    def lookup_imdb_id_via_omdb(self, title: str, year: Optional[int]) -> str:
+        if not self.should_use_omdb():
+            return ""
+
+        cleaned_title = normalize_text(title)
+        if not cleaned_title:
+            return ""
+
+        cache_key = f"omdb_search::{cleaned_title.lower()}::{year or ''}"
+        cached = self.imdb_cache.get(cache_key)
+        if isinstance(cached, dict):
+            imdb_id = str(cached.get("imdb_id", ""))
+            return imdb_id if re.fullmatch(r"tt\d+", imdb_id) else ""
+
+        params = {"apikey": OMDB_API_KEY, "t": cleaned_title, "plot": "short"}
+        if year is not None:
+            params["y"] = str(year)
+
+        payload = self.fetch_json(OMDB_API_URL, params=params)
+        if not payload or str(payload.get("Response", "")).lower() != "true":
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        imdb_id = normalize_text(str(payload.get("imdbID") or ""))
+        if not re.fullmatch(r"tt\d+", imdb_id):
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        self.imdb_cache[cache_key] = {"imdb_id": imdb_id}
+        self.imdb_cache[imdb_id] = asdict(self.omdb_payload_to_metadata(payload))
+        return imdb_id
+
+    def lookup_imdb_id_via_tmdb(self, title: str, year: Optional[int]) -> str:
+        if not self.should_use_tmdb():
+            return ""
+
+        cleaned_title = normalize_text(title)
+        if not cleaned_title:
+            return ""
+
+        cache_key = f"tmdb_search::{cleaned_title.lower()}::{year or ''}"
+        cached = self.imdb_cache.get(cache_key)
+        if isinstance(cached, dict):
+            imdb_id = str(cached.get("imdb_id", ""))
+            return imdb_id if re.fullmatch(r"tt\d+", imdb_id) else ""
+
+        params = {"query": cleaned_title, "include_adult": "false"}
+        if year is not None:
+            params["year"] = str(year)
+
+        search_payload = self.fetch_tmdb_json("/search/movie", params=params)
+        if not search_payload:
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        results = search_payload.get("results")
+        if not isinstance(results, list):
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        query_norm = strip_accents(cleaned_title).lower()
+        for item in results[:6]:
+            if not isinstance(item, dict):
+                continue
+
+            movie_id = item.get("id")
+            if not isinstance(movie_id, int):
+                continue
+
+            candidate_title = normalize_text(str(item.get("title") or ""))
+            candidate_norm = strip_accents(candidate_title).lower()
+            if candidate_norm and query_norm not in candidate_norm and candidate_norm not in query_norm:
+                continue
+
+            if year is not None:
+                release_date = normalize_text(str(item.get("release_date") or ""))
+                year_match = re.match(r"(\d{4})", release_date)
+                if year_match and abs(int(year_match.group(1)) - year) > 1:
+                    continue
+
+            external = self.fetch_tmdb_json(f"/movie/{movie_id}/external_ids")
+            if not isinstance(external, dict):
+                continue
+            imdb_id = normalize_text(str(external.get("imdb_id") or ""))
+            if not re.fullmatch(r"tt\d+", imdb_id):
+                continue
+
+            self.imdb_cache[cache_key] = {"imdb_id": imdb_id}
+            return imdb_id
+
+        self.imdb_cache[cache_key] = {"imdb_id": ""}
+        return ""
+
+    def fetch_omdb_metadata_by_imdb_id(self, imdb_id: str) -> ImdbMetadata:
+        if not self.should_use_omdb() or not re.fullmatch(r"tt\d+", imdb_id):
+            return ImdbMetadata()
+
+        params = {"apikey": OMDB_API_KEY, "i": imdb_id, "plot": "full"}
+        payload = self.fetch_json(OMDB_API_URL, params=params)
+        if not payload or str(payload.get("Response", "")).lower() != "true":
+            return ImdbMetadata()
+
+        meta = self.omdb_payload_to_metadata(payload)
+        self.imdb_cache[imdb_id] = asdict(meta)
+        return meta
+
+    def fetch_tmdb_metadata_by_imdb_id(self, imdb_id: str) -> ImdbMetadata:
+        if not self.should_use_tmdb() or not re.fullmatch(r"tt\d+", imdb_id):
+            return ImdbMetadata()
+
+        find_payload = self.fetch_tmdb_json(
+            f"/find/{imdb_id}",
+            params={"external_source": "imdb_id"},
+        )
+        if not find_payload:
+            return ImdbMetadata()
+
+        movie_results = find_payload.get("movie_results")
+        if not isinstance(movie_results, list) or not movie_results:
+            return ImdbMetadata()
+
+        first = movie_results[0]
+        if not isinstance(first, dict):
+            return ImdbMetadata()
+
+        movie_id = first.get("id")
+        if not isinstance(movie_id, int):
+            return ImdbMetadata()
+
+        details = self.fetch_tmdb_json(
+            f"/movie/{movie_id}",
+            params={"append_to_response": "credits"},
+        )
+        if not isinstance(details, dict):
+            return ImdbMetadata()
+
+        meta = self.tmdb_payload_to_metadata(details)
+        self.imdb_cache[imdb_id] = asdict(meta)
+        return meta
 
     def cache_key(self, url: str) -> str:
         return hashlib.sha1(url.encode("utf-8")).hexdigest()
@@ -721,6 +1057,17 @@ class GuideRapideBuilder:
         if not cleaned_title:
             return ""
 
+        omdb_imdb_id = self.lookup_imdb_id_via_omdb(cleaned_title, year)
+        if omdb_imdb_id:
+            return omdb_imdb_id
+
+        tmdb_imdb_id = self.lookup_imdb_id_via_tmdb(cleaned_title, year)
+        if tmdb_imdb_id:
+            return tmdb_imdb_id
+
+        if not ENABLE_IMDB_SUGGESTION_FALLBACK:
+            return ""
+
         cache_key = f"search::{cleaned_title.lower()}::{year or ''}"
         cached = self.imdb_cache.get(cache_key)
         if isinstance(cached, dict):
@@ -906,6 +1253,17 @@ class GuideRapideBuilder:
                 return ImdbMetadata(**cached)
             except TypeError:
                 pass
+
+        omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
+        if omdb_meta.title or omdb_meta.poster or omdb_meta.description:
+            return omdb_meta
+
+        tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
+        if tmdb_meta.title or tmdb_meta.poster or tmdb_meta.description:
+            return tmdb_meta
+
+        if not ENABLE_IMDB_HTML_FALLBACK:
+            return ImdbMetadata()
 
         url = f"https://www.imdb.com/title/{imdb_id}/"
         html = self.fetch_url(url)
