@@ -63,6 +63,7 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         self.metadata_provider = self.config.metadata_provider
         self.metadata_backfill_mode = self.config.metadata_backfill_mode
         self.omdb_api_keys = self.build_omdb_key_pool()
+        self.omdb_unusable_keys: set[str] = set()
 
         if self.config.require_omdb_metadata:
             if self.metadata_provider != "omdb":

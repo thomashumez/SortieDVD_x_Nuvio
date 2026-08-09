@@ -117,6 +117,7 @@ This favors stability and source politeness over raw speed.
 - Avoid changing output JSON shape unless explicitly requested.
 - Do not publish an empty cold-start catalog when discovery and cache loading both return no movies.
 - Keep provider secrets out of logs; request-failure telemetry may log host and error type only.
+- OMDb keys that return an invalid-key or exhausted-quota response are skipped for the remainder of the current run; the pool resets on the next run.
 - Keep provider-specific logic in `metadata.py` until a provider-specific module split is explicitly introduced.
 
 ## Typical Local Commands

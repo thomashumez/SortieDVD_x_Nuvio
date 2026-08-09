@@ -152,6 +152,35 @@ class BuildCatalogTests(unittest.TestCase):
         finally:
             builder.close()
 
+    def test_omdb_key_fallback_skips_unusable_key_for_rest_of_run(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="omdb",
+            omdb_api_key="key-one",
+            omdb_api_keys_raw="key-two,key-three,key-one",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            responses = [
+                {"Response": "False", "Error": "Invalid API key!"},
+                {"Response": "True", "Title": "First success"},
+                {"Response": "True", "Title": "Second success"},
+            ]
+            with patch.object(builder, "fetch_json", side_effect=responses) as fetch_json:
+                first = builder.fetch_omdb_json_with_key_fallback({"i": "tt1234567"})
+                second = builder.fetch_omdb_json_with_key_fallback({"i": "tt7654321"})
+
+            self.assertEqual(first["Title"], "First success")
+            self.assertEqual(second["Title"], "Second success")
+            self.assertEqual(builder.omdb_api_keys, ["key-one", "key-two", "key-three"])
+            self.assertEqual(builder.omdb_unusable_keys, {"key-one"})
+            attempted_keys = [
+                call.kwargs["params"]["apikey"] for call in fetch_json.call_args_list
+            ]
+            self.assertEqual(attempted_keys, ["key-one", "key-two", "key-two"])
+        finally:
+            builder.close()
+
     def test_required_omdb_mode_requires_an_api_key(self) -> None:
         config = replace(
             build_catalog.BuildConfig.from_env(),

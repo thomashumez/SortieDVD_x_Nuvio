@@ -61,6 +61,9 @@ class MetadataMixin:
             return None
 
         for key in self.omdb_api_keys:
+            if key in self.omdb_unusable_keys:
+                continue
+
             payload = self.fetch_json(OMDB_API_URL, params={**params, "apikey": key})
             if not payload:
                 continue
@@ -72,6 +75,9 @@ class MetadataMixin:
 
             error_text = normalize_text(str(payload.get("Error") or "")).lower()
             if "invalid api key" in error_text or "request limit reached" in error_text:
+                # Do not spend another request on a definitively unusable key
+                # during this run. A fresh builder/run resets this set.
+                self.omdb_unusable_keys.add(key)
                 continue
 
             # For true content misses (movie not found), no need to try every key.
