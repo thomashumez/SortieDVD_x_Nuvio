@@ -1026,34 +1026,48 @@ class GuideRapideBuilder:
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
 
-    def apply_imdb_metadata(self, movie: Movie) -> None:
+    def apply_imdb_metadata(self, movie: Movie) -> bool:
         if not movie.imdb_id:
-            return
+            return False
 
         imdb = self.fetch_imdb_metadata(movie.imdb_id)
+        changed = False
 
-        if imdb.title:
+        if imdb.title and movie.title != imdb.title:
             movie.title = imdb.title
-        if imdb.year is not None:
+            changed = True
+        if imdb.year is not None and movie.year != imdb.year:
             movie.year = imdb.year
-        if imdb.director:
+            changed = True
+        if imdb.director and movie.director != imdb.director:
             movie.director = imdb.director
-        if imdb.actors:
+            changed = True
+        if imdb.actors and movie.actors != imdb.actors:
             movie.actors = imdb.actors
-        if imdb.poster:
+            changed = True
+        if imdb.poster and movie.poster != imdb.poster:
             movie.poster = imdb.poster
-        if imdb.description:
+            changed = True
+        if imdb.description and movie.synopsis != imdb.description:
             movie.synopsis = imdb.description
-        if imdb.genres:
+            changed = True
+        if imdb.genres and movie.genres != imdb.genres:
             movie.genres = imdb.genres
-        if imdb.rating:
+            changed = True
+        if imdb.rating and movie.rating != imdb.rating:
             movie.rating = imdb.rating
-        if imdb.voters is not None:
+            changed = True
+        if imdb.voters is not None and movie.voters != imdb.voters:
             movie.voters = imdb.voters
-        if imdb.runtime:
+            changed = True
+        if imdb.runtime and movie.runtime != imdb.runtime:
             movie.runtime = imdb.runtime
-        if imdb.trailer_url:
+            changed = True
+        if imdb.trailer_url and movie.trailer_url != imdb.trailer_url:
             movie.trailer_url = imdb.trailer_url
+            changed = True
+
+        return changed
 
     def should_refresh_poster_from_imdb(self, movie: Movie) -> bool:
         if not movie.imdb_id:
@@ -1133,6 +1147,7 @@ class GuideRapideBuilder:
         stale_or_new = 0
         skipped_due_to_cap = 0
         backfilled_country_count = 0
+        imdb_rehydrated_cache_count = 0
 
         log(f"[{self.elapsed()}] Movie phase start: discovered_urls={len(discovered_urls)}")
 
@@ -1147,12 +1162,16 @@ class GuideRapideBuilder:
             except TypeError:
                 continue
             self.ensure_canonical_id(cached)
+            if self.apply_imdb_metadata(cached):
+                imdb_rehydrated_cache_count += 1
             movies[cached.guide_rapide_id] = cached
 
         for film_id, url in sorted(discovered_urls.items(), reverse=True):
             cached = self.read_cached_movie(film_id)
             if cached and not self.should_recheck_movie(film_id):
                 self.ensure_canonical_id(cached)
+                if self.apply_imdb_metadata(cached):
+                    imdb_rehydrated_cache_count += 1
                 if (
                     backfilled_country_count < MAX_COUNTRY_BACKFILL_PER_RUN
                     and self.needs_country_backfill(cached)
@@ -1200,7 +1219,8 @@ class GuideRapideBuilder:
         log(
             f"[{self.elapsed()}] Movie phase done: fetched={fetched_this_run}, "
             f"candidates={stale_or_new}, capped_skips={skipped_due_to_cap}, "
-            f"country_backfill={backfilled_country_count}"
+            f"country_backfill={backfilled_country_count}, "
+            f"imdb_rehydrated_cache={imdb_rehydrated_cache_count}"
         )
 
         return list(movies.values())
@@ -1223,6 +1243,8 @@ class GuideRapideBuilder:
             "poster": movie.poster,
             "releaseInfo": self.release_info_text(movie),
         }
+        if movie.imdb_id:
+            preview["imdb_id"] = movie.imdb_id
         if movie.released:
             preview["released"] = movie.released
         if movie.genres:
@@ -1297,12 +1319,12 @@ class GuideRapideBuilder:
         catalog_defs = [
             {
                 "type": "movie",
-                "id": "dvd-3-mois-production-francaise",
+                "id": "dvd-12-mois-production-francaise",
                 "name": "DVD 12 mois - Production francaise",
             },
             {
                 "type": "movie",
-                "id": "dvd-3-mois-international",
+                "id": "dvd-12-mois-international",
                 "name": "DVD 12 mois - International",
             },
         ]
@@ -1318,8 +1340,8 @@ class GuideRapideBuilder:
         dvd_recent_international = [m for m in dvd_recent if not self.is_french_production(m)]
 
         catalogs: dict[str, list[Movie]] = {
-            "dvd-3-mois-production-francaise": dvd_recent_fr,
-            "dvd-3-mois-international": dvd_recent_international,
+            "dvd-12-mois-production-francaise": dvd_recent_fr,
+            "dvd-12-mois-international": dvd_recent_international,
         }
 
         if physical_future:
@@ -1373,8 +1395,8 @@ class GuideRapideBuilder:
             f"<p>Liens films decouverts pendant le crawl: <strong>{discovered_count}</strong></p>",
             "<ul>",
             '<li><a href="manifest.json">manifest.json</a></li>',
-            '<li><a href="catalog/movie/dvd-3-mois-production-francaise.json">DVD 12 mois - Production francaise</a></li>',
-            '<li><a href="catalog/movie/dvd-3-mois-international.json">DVD 12 mois - International</a></li>',
+            '<li><a href="catalog/movie/dvd-12-mois-production-francaise.json">DVD 12 mois - Production francaise</a></li>',
+            '<li><a href="catalog/movie/dvd-12-mois-international.json">DVD 12 mois - International</a></li>',
             "</ul>",
             "</body>",
             "</html>",

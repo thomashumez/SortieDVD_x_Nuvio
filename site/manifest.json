@@ -2,12 +2,12 @@
   "background": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
   "catalogs": [
     {
-      "id": "dvd-3-mois-production-francaise",
+      "id": "dvd-12-mois-production-francaise",
       "name": "DVD 12 mois - Production francaise",
       "type": "movie"
     },
     {
-      "id": "dvd-3-mois-international",
+      "id": "dvd-12-mois-international",
       "name": "DVD 12 mois - International",
       "type": "movie"
     },
