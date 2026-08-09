@@ -22,6 +22,16 @@ on:
         required: false
         default: "2500"
         type: string
+      wipe_cache:
+        description: "Ignore existing scraper cache and rebuild from zero"
+        required: false
+        default: false
+        type: boolean
+      cache_namespace:
+        description: "Cache namespace version (bump to invalidate old remote caches)"
+        required: false
+        default: "v2"
+        type: string
   schedule:
     - cron: "17 0-6 * * *"
   push:
@@ -86,13 +96,21 @@ jobs:
           python-version: "3.12"
 
       - name: Restore scraper cache
-        if: steps.nightly_gate.outputs.should_run == 'true'
+        if: steps.nightly_gate.outputs.should_run == 'true' && inputs.wipe_cache != true
         uses: actions/cache@v4
         with:
           path: data/cache
-          key: ${{ runner.os }}-guide-rapide-cache-v1-${{ github.ref_name }}
+          key: ${{ runner.os }}-guide-rapide-cache-${{ inputs.cache_namespace || 'v2' }}-${{ github.ref_name }}
           restore-keys: |
-            ${{ runner.os }}-guide-rapide-cache-v1-
+            ${{ runner.os }}-guide-rapide-cache-${{ inputs.cache_namespace || 'v2' }}-
+
+      - name: Wipe local scraper cache
+        if: steps.nightly_gate.outputs.should_run == 'true' && inputs.wipe_cache == true
+        run: |
+          rm -rf data/cache/pages
+          rm -rf data/cache/movies
+          rm -rf data/cache/imdb
+          rm -f data/cache/state.json
 
       - name: Install dependencies
         if: steps.nightly_gate.outputs.should_run == 'true'
@@ -105,7 +123,9 @@ jobs:
         id: resolve_mode
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "push" ]]; then
+          if [[ "${{ inputs.wipe_cache }}" == "true" ]]; then
+            discovery_mode="full"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
             discovery_mode="incremental"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             discovery_mode="${{ inputs.discovery_mode || 'auto' }}"

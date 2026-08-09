@@ -1026,8 +1026,17 @@ class GuideRapideBuilder:
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
 
-    def apply_imdb_metadata(self, movie: Movie) -> bool:
+    def has_cached_imdb_metadata(self, imdb_id: str) -> bool:
+        if not imdb_id:
+            return False
+        cached = self.imdb_cache.get(imdb_id)
+        return isinstance(cached, dict)
+
+    def apply_imdb_metadata(self, movie: Movie, allow_network: bool = True) -> bool:
         if not movie.imdb_id:
+            return False
+
+        if not allow_network and not self.has_cached_imdb_metadata(movie.imdb_id):
             return False
 
         imdb = self.fetch_imdb_metadata(movie.imdb_id)
@@ -1162,7 +1171,7 @@ class GuideRapideBuilder:
             except TypeError:
                 continue
             self.ensure_canonical_id(cached)
-            if self.apply_imdb_metadata(cached):
+            if self.apply_imdb_metadata(cached, allow_network=False):
                 imdb_rehydrated_cache_count += 1
             movies[cached.guide_rapide_id] = cached
 
@@ -1170,7 +1179,7 @@ class GuideRapideBuilder:
             cached = self.read_cached_movie(film_id)
             if cached and not self.should_recheck_movie(film_id):
                 self.ensure_canonical_id(cached)
-                if self.apply_imdb_metadata(cached):
+                if self.apply_imdb_metadata(cached, allow_network=False):
                     imdb_rehydrated_cache_count += 1
                 if (
                     backfilled_country_count < MAX_COUNTRY_BACKFILL_PER_RUN
