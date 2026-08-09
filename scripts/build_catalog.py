@@ -35,8 +35,11 @@ STATE_FILE = CACHE_DIR / "state.json"
 
 REQUEST_TIMEOUT = 30
 REQUEST_DELAY_SECONDS = 0.5
-MAX_ARCHIVE_PAGES = int(os.getenv("GR_MAX_ARCHIVE_PAGES", "850"))
-MAX_MOVIE_FETCH_PER_RUN = int(os.getenv("GR_MAX_MOVIE_FETCH_PER_RUN", "320"))
+DISCOVERY_MODE = os.getenv("GR_DISCOVERY_MODE", "auto").lower()
+FULL_ARCHIVE_PAGES = int(os.getenv("GR_FULL_ARCHIVE_PAGES", "4000"))
+INCREMENTAL_ARCHIVE_PAGES = int(os.getenv("GR_INCREMENTAL_ARCHIVE_PAGES", "850"))
+FULL_MOVIE_FETCH_PER_RUN = int(os.getenv("GR_FULL_MOVIE_FETCH_PER_RUN", "2500"))
+INCREMENTAL_MOVIE_FETCH_PER_RUN = int(os.getenv("GR_INCREMENTAL_MOVIE_FETCH_PER_RUN", "320"))
 START_YEAR = 2000
 CURRENT_YEAR = datetime.now(timezone.utc).year
 ARCHIVE_CACHE_TTL_HOURS = 20
@@ -288,12 +291,33 @@ class GuideRapideBuilder:
         write_json(meta_path, {"url": url, "fetched_at": datetime.now(timezone.utc).isoformat()})
         return html
 
-    def build_seed_urls(self) -> list[str]:
+    def build_seed_urls(self, full_scan: bool) -> list[str]:
         seeds = [
             urljoin(BASE_URL, "accueil.html"),
             urljoin(BASE_URL, "accueil-actualite-dvd-vod-bluray-a-la-une-note.html"),
             RSS_URL,
         ]
+
+        if not full_scan:
+            today = datetime.now(timezone.utc).date()
+            recent_years = {today.year, max(START_YEAR, today.year - 1)}
+
+            for year in sorted(recent_years):
+                seeds.extend(
+                    [
+                        urljoin(BASE_URL, f"accueil-{year}-note.html"),
+                        urljoin(BASE_URL, f"dvd-vente-{year}-tous-note.html"),
+                        urljoin(BASE_URL, f"dvd-vente-{year}-fil-date.html"),
+                        urljoin(BASE_URL, f"dvd-vente-{year}-futur-date.html"),
+                    ]
+                )
+
+            for months_back in range(0, 13):
+                month_date = subtract_months(today, months_back)
+                seeds.append(urljoin(BASE_URL, f"accueil-{month_date.year}-{month_date.month:02d}-note.html"))
+                seeds.append(urljoin(BASE_URL, f"accueil-{month_date.year}-{month_date.month}-note.html"))
+
+            return list(dict.fromkeys(seeds))
 
         for year in range(START_YEAR, CURRENT_YEAR + 2):
             seeds.extend(
@@ -312,6 +336,30 @@ class GuideRapideBuilder:
             seeds.append(urljoin(BASE_URL, f"accueil-{CURRENT_YEAR}-{month}-note.html"))
 
         return list(dict.fromkeys(seeds))
+
+    def has_cached_movies(self) -> bool:
+        return any(MOVIE_CACHE_DIR.glob("film-*.json"))
+
+    def resolve_run_profile(self) -> dict[str, object]:
+        mode = DISCOVERY_MODE if DISCOVERY_MODE in {"auto", "full", "incremental"} else "auto"
+        has_state = bool(self.state.get("last_run"))
+        has_cache = self.has_cached_movies()
+
+        if mode == "full":
+            full_scan = True
+        elif mode == "incremental":
+            full_scan = False
+        else:
+            # Auto mode: first run is full bootstrap, following runs are incremental.
+            full_scan = not (has_state and has_cache)
+
+        profile_name = "full" if full_scan else "incremental"
+        return {
+            "mode": profile_name,
+            "full_scan": full_scan,
+            "max_archive_pages": FULL_ARCHIVE_PAGES if full_scan else INCREMENTAL_ARCHIVE_PAGES,
+            "max_movie_fetch_per_run": FULL_MOVIE_FETCH_PER_RUN if full_scan else INCREMENTAL_MOVIE_FETCH_PER_RUN,
+        }
 
     def is_internal(self, url: str) -> bool:
         return urlparse(url).netloc.endswith("guide-rapide.com")
@@ -341,17 +389,22 @@ class GuideRapideBuilder:
             return None
         return int(match.group(1))
 
-    def discover_film_urls(self) -> dict[int, str]:
+    def discover_film_urls(self, run_profile: dict[str, object]) -> dict[int, str]:
+        max_archive_pages = int(run_profile["max_archive_pages"])
+        max_movie_fetch_per_run = int(run_profile["max_movie_fetch_per_run"])
+        full_scan = bool(run_profile["full_scan"])
+        mode = str(run_profile["mode"])
+
         log(
-            f"[{self.elapsed()}] Discovery start: max_archive_pages={MAX_ARCHIVE_PAGES}, "
-            f"max_movie_fetch_per_run={MAX_MOVIE_FETCH_PER_RUN}"
+            f"[{self.elapsed()}] Discovery start: mode={mode}, full_scan={full_scan}, "
+            f"max_archive_pages={max_archive_pages}, max_movie_fetch_per_run={max_movie_fetch_per_run}"
         )
-        queue = deque(self.build_seed_urls())
+        queue = deque(self.build_seed_urls(full_scan=full_scan))
         visited: set[str] = set()
         film_urls: dict[int, str] = {}
 
         processed = 0
-        while queue and processed < MAX_ARCHIVE_PAGES:
+        while queue and processed < max_archive_pages:
             url = queue.popleft()
             if url in visited:
                 continue
@@ -384,7 +437,7 @@ class GuideRapideBuilder:
 
             if processed % 25 == 0:
                 log(
-                    f"[{self.elapsed()}] Discovery progress: {processed}/{MAX_ARCHIVE_PAGES} pages, "
+                    f"[{self.elapsed()}] Discovery progress: {processed}/{max_archive_pages} pages, "
                     f"{len(film_urls)} movie links"
                 )
 
@@ -966,7 +1019,7 @@ class GuideRapideBuilder:
         self.write_cached_movie(movie)
         return True
 
-    def load_movies(self, discovered_urls: dict[int, str]) -> list[Movie]:
+    def load_movies(self, discovered_urls: dict[int, str], max_movie_fetch_per_run: int) -> list[Movie]:
         movies: dict[int, Movie] = {}
         fetched_this_run = 0
         stale_or_new = 0
@@ -1003,7 +1056,7 @@ class GuideRapideBuilder:
 
             stale_or_new += 1
 
-            if fetched_this_run >= MAX_MOVIE_FETCH_PER_RUN:
+            if fetched_this_run >= max_movie_fetch_per_run:
                 if cached:
                     movies[film_id] = cached
                 skipped_due_to_cap += 1
@@ -1018,7 +1071,7 @@ class GuideRapideBuilder:
             fetched_this_run += 1
             if fetched_this_run % 10 == 0:
                 log(
-                    f"[{self.elapsed()}] Movie fetch progress: {fetched_this_run}/{MAX_MOVIE_FETCH_PER_RUN} "
+                    f"[{self.elapsed()}] Movie fetch progress: {fetched_this_run}/{max_movie_fetch_per_run} "
                     f"(candidates={stale_or_new}, capped_skips={skipped_due_to_cap})"
                 )
 
@@ -1124,7 +1177,7 @@ class GuideRapideBuilder:
 
     def build_catalogs(self, movies: list[Movie]) -> tuple[list[dict], dict[str, list[Movie]]]:
         today = datetime.now(timezone.utc).date().isoformat()
-        last_3_months_cutoff = subtract_months(datetime.now(timezone.utc).date(), 3).isoformat()
+        last_12_months_cutoff = subtract_months(datetime.now(timezone.utc).date(), 12).isoformat()
 
         physical_movies = [m for m in movies if m.physical_available]
         physical_past = [m for m in physical_movies if m.released and m.released <= today]
@@ -1137,20 +1190,19 @@ class GuideRapideBuilder:
             {
                 "type": "movie",
                 "id": "dvd-3-mois-production-francaise",
-                "name": "DVD 3 mois - Production francaise",
+                "name": "DVD 12 mois - Production francaise",
             },
             {
                 "type": "movie",
                 "id": "dvd-3-mois-international",
-                "name": "DVD 3 mois - International",
+                "name": "DVD 12 mois - International",
             },
-            {"type": "movie", "id": "toutes-sorties-physiques", "name": "Toutes les sorties physiques"},
         ]
 
         dvd_recent = [
             m
             for m in physical_past
-            if m.dvd_release_date and m.dvd_release_date >= last_3_months_cutoff
+            if m.dvd_release_date and m.dvd_release_date >= last_12_months_cutoff
         ]
         dvd_recent.sort(key=lambda m: m.dvd_release_date, reverse=True)
 
@@ -1160,7 +1212,6 @@ class GuideRapideBuilder:
         catalogs: dict[str, list[Movie]] = {
             "dvd-3-mois-production-francaise": dvd_recent_fr,
             "dvd-3-mois-international": dvd_recent_international,
-            "toutes-sorties-physiques": physical_past,
         }
 
         if physical_future:
@@ -1214,9 +1265,8 @@ class GuideRapideBuilder:
             f"<p>Liens films decouverts pendant le crawl: <strong>{discovered_count}</strong></p>",
             "<ul>",
             '<li><a href="manifest.json">manifest.json</a></li>',
-            '<li><a href="catalog/movie/toutes-sorties-physiques.json">Toutes les sorties physiques</a></li>',
-            '<li><a href="catalog/movie/dvd-3-mois-production-francaise.json">DVD 3 mois - Production francaise</a></li>',
-            '<li><a href="catalog/movie/dvd-3-mois-international.json">DVD 3 mois - International</a></li>',
+            '<li><a href="catalog/movie/dvd-3-mois-production-francaise.json">DVD 12 mois - Production francaise</a></li>',
+            '<li><a href="catalog/movie/dvd-3-mois-international.json">DVD 12 mois - International</a></li>',
             "</ul>",
             "</body>",
             "</html>",
@@ -1231,8 +1281,12 @@ class GuideRapideBuilder:
 
     def build(self) -> None:
         log(f"[{self.elapsed()}] Build started")
-        discovered_urls = self.discover_film_urls()
-        movies = self.load_movies(discovered_urls)
+        run_profile = self.resolve_run_profile()
+        discovered_urls = self.discover_film_urls(run_profile)
+        movies = self.load_movies(
+            discovered_urls,
+            max_movie_fetch_per_run=int(run_profile["max_movie_fetch_per_run"]),
+        )
 
         physical_movies = [m for m in movies if m.physical_available]
         physical_movies.sort(key=lambda m: (m.released, m.guide_rapide_id), reverse=True)

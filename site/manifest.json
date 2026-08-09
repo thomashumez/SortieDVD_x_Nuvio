@@ -3,17 +3,12 @@
   "catalogs": [
     {
       "id": "dvd-3-mois-production-francaise",
-      "name": "DVD 3 mois - Production francaise",
+      "name": "DVD 12 mois - Production francaise",
       "type": "movie"
     },
     {
       "id": "dvd-3-mois-international",
-      "name": "DVD 3 mois - International",
-      "type": "movie"
-    },
-    {
-      "id": "toutes-sorties-physiques",
-      "name": "Toutes les sorties physiques",
+      "name": "DVD 12 mois - International",
       "type": "movie"
     },
     {

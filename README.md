@@ -26,9 +26,8 @@ The build script generates:
 
 Main catalogs:
 
-- DVD 3 mois - Production francaise (`dvd-3-mois-production-francaise`)
-- DVD 3 mois - International (`dvd-3-mois-international`)
-- Toutes les sorties physiques (`toutes-sorties-physiques`)
+- DVD 12 mois - Production francaise (`dvd-3-mois-production-francaise`)
+- DVD 12 mois - International (`dvd-3-mois-international`)
 - Prochaines sorties (`prochaines-sorties`) when future physical release dates are present
 
 ## Local run
@@ -41,13 +40,24 @@ python scripts/build_catalog.py
 Optional tuning for a bigger one-time backfill:
 
 ```bash
-GR_MAX_ARCHIVE_PAGES=2000 GR_MAX_MOVIE_FETCH_PER_RUN=2500 python scripts/build_catalog.py
+GR_DISCOVERY_MODE=full GR_FULL_ARCHIVE_PAGES=5000 GR_FULL_MOVIE_FETCH_PER_RUN=5000 python scripts/build_catalog.py
 ```
 
-Optional tuning for production-country backfill used by the 3-month French/International catalogs:
+Optional tuning for production-country backfill used by the 12-month French/International catalogs:
 
 ```bash
 GR_MAX_COUNTRY_BACKFILL_PER_RUN=300 GR_COUNTRY_BACKFILL_WINDOW_DAYS=180 python scripts/build_catalog.py
+```
+
+Crawl strategy (default):
+
+- First run: full bootstrap crawl (`GR_DISCOVERY_MODE=auto`)
+- Next runs: incremental crawl using cache/state
+
+Optional tuning for incremental daily runs:
+
+```bash
+GR_DISCOVERY_MODE=incremental GR_INCREMENTAL_ARCHIVE_PAGES=850 GR_INCREMENTAL_MOVIE_FETCH_PER_RUN=320 python scripts/build_catalog.py
 ```
 
 Then open `site/manifest.json` or `site/index.html`.
@@ -60,7 +70,7 @@ Workflow file location:
 
 Triggers:
 
-- Daily schedule
+- Daily schedule (randomized slot in the night window 00:00-07:00 UTC)
 - `workflow_dispatch`
 - Push on main for relevant files
 
