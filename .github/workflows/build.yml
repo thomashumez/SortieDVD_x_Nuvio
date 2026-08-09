@@ -2,6 +2,26 @@ name: Build and Deploy Nuvio Catalog
 
 on:
   workflow_dispatch:
+    inputs:
+      discovery_mode:
+        description: "Crawl mode (auto=first run full then incremental)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - full
+          - incremental
+      full_archive_pages:
+        description: "Only for full mode: archive pages limit"
+        required: false
+        default: "4000"
+        type: string
+      full_movie_fetch:
+        description: "Only for full mode: movie fetch limit"
+        required: false
+        default: "2500"
+        type: string
   schedule:
     - cron: "17 0-6 * * *"
   push:
@@ -84,6 +104,9 @@ jobs:
         if: steps.nightly_gate.outputs.should_run == 'true'
         env:
           PYTHONUNBUFFERED: "1"
+          GR_DISCOVERY_MODE: ${{ inputs.discovery_mode || 'auto' }}
+          GR_FULL_ARCHIVE_PAGES: ${{ inputs.full_archive_pages || '4000' }}
+          GR_FULL_MOVIE_FETCH_PER_RUN: ${{ inputs.full_movie_fetch || '2500' }}
         run: python -u scripts/build_catalog.py
 
       - name: Setup Pages
