@@ -66,6 +66,10 @@ class MetadataMixin:
 
             payload = self.fetch_json(OMDB_API_URL, params={**params, "apikey": key})
             if not payload:
+                # OMDb returns invalid keys and exhausted quotas as HTTP 401/403/429
+                # in addition to its JSON error form. Remember those keys too.
+                if self.last_http_status in {401, 403, 429}:
+                    self.omdb_unusable_keys.add(key)
                 continue
 
             # Switch to next key when current key is invalid or daily quota is exhausted.

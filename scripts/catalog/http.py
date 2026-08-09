@@ -55,6 +55,7 @@ class HttpMixin:
             return None
 
     def fetch_json(self, url: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
+        self.last_http_status = None
         bucket, delay_seconds, timeout_seconds = self.request_profile(url)
         if not self.reserve_request_budget(bucket):
             return None
@@ -62,10 +63,14 @@ class HttpMixin:
         self.last_request_ts_by_bucket[bucket] = time.time()
         try:
             response = self.session.get(url, params=params, timeout=timeout_seconds)
+            self.last_http_status = response.status_code
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, json.JSONDecodeError, ValueError) as exc:
             if isinstance(exc, requests.RequestException):
+                response = getattr(exc, "response", None)
+                if response is not None:
+                    self.last_http_status = response.status_code
                 self.log_request_failure(url, exc)
             return None
 
@@ -76,9 +81,12 @@ class HttpMixin:
     def log_request_failure(self, url: str, error: Exception) -> None:
         self.request_failures += 1
         host = (urlparse(url).hostname or "unknown-host").lower()
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        status_suffix = f", status={status}" if status is not None else ""
         log(
             f"[{self.elapsed()}] Request failed: host={host}, "
-            f"error={type(error).__name__}"
+            f"error={type(error).__name__}{status_suffix}"
         )
 
     def reserve_request_budget(self, bucket: str) -> bool:

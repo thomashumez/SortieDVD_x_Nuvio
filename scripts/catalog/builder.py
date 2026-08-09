@@ -49,6 +49,7 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         self.metadata_budget_warning_emitted = False
         self.metadata_backfill_attempts = 0
         self.request_failures = 0
+        self.last_http_status: Optional[int] = None
 
         self.state = read_json(STATE_FILE, default={"movies": {}, "last_run": ""})
         if not isinstance(self.state, dict):

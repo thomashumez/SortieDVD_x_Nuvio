@@ -86,7 +86,7 @@ Notes:
 
 - `GR_OMDB_API_KEY` is the primary key.
 - `GR_OMDB_API_KEYS` is an optional comma-separated fallback pool.
-- The builder automatically switches keys on OMDb `Invalid API key` or `Request limit reached` responses and skips unusable keys for the rest of that run.
+- The builder automatically switches keys on OMDb invalid-key/quota responses (JSON or HTTP 401/403/429) and skips unusable keys for the rest of that run.
 
 Provider options:
 
