@@ -30,6 +30,7 @@ META_DIR = OUTPUT_DIR / "meta" / "movie"
 CACHE_DIR = ROOT_DIR / "data" / "cache"
 PAGE_CACHE_DIR = CACHE_DIR / "pages"
 MOVIE_CACHE_DIR = CACHE_DIR / "movies"
+IMDB_CACHE_DIR = CACHE_DIR / "imdb"
 STATE_FILE = CACHE_DIR / "state.json"
 
 REQUEST_TIMEOUT = 30
@@ -40,6 +41,8 @@ START_YEAR = 2000
 CURRENT_YEAR = datetime.now(timezone.utc).year
 ARCHIVE_CACHE_TTL_HOURS = 20
 MOVIE_RECHECK_DAYS = 45
+COUNTRY_BACKFILL_WINDOW_DAYS = int(os.getenv("GR_COUNTRY_BACKFILL_WINDOW_DAYS", "150"))
+MAX_COUNTRY_BACKFILL_PER_RUN = int(os.getenv("GR_MAX_COUNTRY_BACKFILL_PER_RUN", "120"))
 
 HEADERS = {
     "User-Agent": (
@@ -105,6 +108,16 @@ class Movie:
     checked_at: str
 
 
+@dataclass
+class ImdbMetadata:
+    poster: str = ""
+    description: str = ""
+    genres: list[str] | None = None
+    rating: str = ""
+    voters: Optional[int] = None
+    runtime: str = ""
+
+
 def normalize_text(value: str) -> str:
     return " ".join(value.split()).strip()
 
@@ -147,6 +160,15 @@ def dt_to_iso(dt: Optional[datetime]) -> str:
     if not dt:
         return ""
     return dt.date().isoformat()
+
+
+def parse_iso_date(value: str) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except ValueError:
+        return None
 
 
 def read_json(path: Path, default: object) -> object:
@@ -207,6 +229,10 @@ class GuideRapideBuilder:
             self.state = {"movies": {}, "last_run": ""}
         if not isinstance(self.state.get("movies"), dict):
             self.state["movies"] = {}
+
+        self.imdb_cache: dict[str, dict] = read_json(IMDB_CACHE_DIR / "index.json", default={})
+        if not isinstance(self.imdb_cache, dict):
+            self.imdb_cache = {}
 
     def elapsed(self) -> str:
         seconds = int(time.monotonic() - self.start_ts)
@@ -416,6 +442,10 @@ class GuideRapideBuilder:
         MOVIE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         cache_file = MOVIE_CACHE_DIR / f"film-{movie.guide_rapide_id}.json"
         write_json(cache_file, asdict(movie))
+
+    def write_imdb_cache(self) -> None:
+        IMDB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        write_json(IMDB_CACHE_DIR / "index.json", self.imdb_cache)
 
     def extract_release_dates(self, soup: BeautifulSoup, raw_html: str) -> tuple[Optional[datetime], Optional[datetime], str]:
         dvd_date: Optional[datetime] = None
@@ -715,13 +745,156 @@ class GuideRapideBuilder:
             physical_available=physical_available,
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
+
+        self.enrich_from_imdb_if_needed(movie)
         return movie
+
+    def fetch_imdb_metadata(self, imdb_id: str) -> ImdbMetadata:
+        if not imdb_id:
+            return ImdbMetadata()
+
+        cached = self.imdb_cache.get(imdb_id)
+        if isinstance(cached, dict):
+            try:
+                return ImdbMetadata(**cached)
+            except TypeError:
+                pass
+
+        url = f"https://www.imdb.com/title/{imdb_id}/"
+        html = self.fetch_url(url)
+        if not html:
+            return ImdbMetadata()
+
+        soup = BeautifulSoup(html, "lxml")
+        data = {}
+        for tag in soup.select('script[type="application/ld+json"]'):
+            text = tag.string or tag.get_text("", strip=True)
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(parsed, dict) and parsed.get("@type") == "Movie":
+                data = parsed
+                break
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("@type") == "Movie":
+                        data = item
+                        break
+                if data:
+                    break
+
+        if not data:
+            return ImdbMetadata()
+
+        rating = ""
+        voters = None
+        aggregate = data.get("aggregateRating")
+        if isinstance(aggregate, dict):
+            rating_raw = aggregate.get("ratingValue")
+            if isinstance(rating_raw, (int, float, str)):
+                rating = str(rating_raw)
+            voters_raw = aggregate.get("ratingCount")
+            if isinstance(voters_raw, (int, float, str)):
+                voters = parse_int(str(voters_raw))
+
+        runtime = ""
+        duration_raw = data.get("duration")
+        if isinstance(duration_raw, str):
+            m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?", duration_raw)
+            if m:
+                h = int(m.group(1) or 0)
+                mins = int(m.group(2) or 0)
+                if h and mins:
+                    runtime = f"{h}h{mins:02d}"
+                elif h:
+                    runtime = f"{h}h"
+                elif mins:
+                    runtime = f"{mins}min"
+
+        genres: list[str] = []
+        genre_raw = data.get("genre")
+        if isinstance(genre_raw, str):
+            genres = [normalize_text(genre_raw)]
+        elif isinstance(genre_raw, list):
+            genres = [normalize_text(str(x)) for x in genre_raw if normalize_text(str(x))]
+
+        meta = ImdbMetadata(
+            poster=str(data.get("image") or "").strip(),
+            description=normalize_text(str(data.get("description") or "")),
+            genres=genres,
+            rating=rating,
+            voters=voters,
+            runtime=runtime,
+        )
+        self.imdb_cache[imdb_id] = asdict(meta)
+        return meta
+
+    def enrich_from_imdb_if_needed(self, movie: Movie) -> None:
+        if not movie.imdb_id:
+            return
+
+        needs_poster = (not movie.poster) or ("favicon.ico" in movie.poster)
+        needs_meta = not movie.synopsis or not movie.rating or not movie.runtime or not movie.genres
+        if not needs_poster and not needs_meta:
+            return
+
+        imdb = self.fetch_imdb_metadata(movie.imdb_id)
+        if needs_poster and imdb.poster:
+            movie.poster = imdb.poster
+        if (not movie.synopsis) and imdb.description:
+            movie.synopsis = imdb.description
+        if (not movie.genres) and imdb.genres:
+            movie.genres = imdb.genres
+        if (not movie.rating) and imdb.rating:
+            movie.rating = imdb.rating
+        if movie.voters is None and imdb.voters is not None:
+            movie.voters = imdb.voters
+        if (not movie.runtime) and imdb.runtime:
+            movie.runtime = imdb.runtime
+
+    def needs_country_backfill(self, movie: Movie) -> bool:
+        if movie.production_countries:
+            return False
+        if not movie.dvd_release_date:
+            return False
+
+        dvd_dt = parse_iso_date(movie.dvd_release_date)
+        if not dvd_dt:
+            return False
+
+        age_days = (datetime.now(timezone.utc).date() - dvd_dt).days
+        return age_days <= COUNTRY_BACKFILL_WINDOW_DAYS
+
+    def backfill_production_countries(self, movie: Movie) -> bool:
+        html = self.fetch_url(movie.source_url)
+        if not html:
+            return False
+
+        soup = BeautifulSoup(html, "lxml")
+        text_blob = soup.get_text("\n", strip=True)
+        countries = self.extract_production_countries(str(soup), text_blob)
+        if not countries:
+            return False
+
+        movie.production_countries = countries
+        movie.checked_at = datetime.now(timezone.utc).isoformat()
+        self.state["movies"][str(movie.guide_rapide_id)] = {
+            "checked_at": movie.checked_at,
+            "source_url": movie.source_url,
+        }
+        self.write_cached_movie(movie)
+        return True
 
     def load_movies(self, discovered_urls: dict[int, str]) -> list[Movie]:
         movies: dict[int, Movie] = {}
         fetched_this_run = 0
         stale_or_new = 0
         skipped_due_to_cap = 0
+        backfilled_country_count = 0
 
         log(f"[{self.elapsed()}] Movie phase start: discovered_urls={len(discovered_urls)}")
 
@@ -740,6 +913,12 @@ class GuideRapideBuilder:
         for film_id, url in sorted(discovered_urls.items(), reverse=True):
             cached = self.read_cached_movie(film_id)
             if cached and not self.should_recheck_movie(film_id):
+                if (
+                    backfilled_country_count < MAX_COUNTRY_BACKFILL_PER_RUN
+                    and self.needs_country_backfill(cached)
+                    and self.backfill_production_countries(cached)
+                ):
+                    backfilled_country_count += 1
                 movies[film_id] = cached
                 continue
 
@@ -779,7 +958,8 @@ class GuideRapideBuilder:
 
         log(
             f"[{self.elapsed()}] Movie phase done: fetched={fetched_this_run}, "
-            f"candidates={stale_or_new}, capped_skips={skipped_due_to_cap}"
+            f"candidates={stale_or_new}, capped_skips={skipped_due_to_cap}, "
+            f"country_backfill={backfilled_country_count}"
         )
 
         return list(movies.values())
@@ -967,6 +1147,7 @@ class GuideRapideBuilder:
     def persist_state(self) -> None:
         self.state["last_run"] = datetime.now(timezone.utc).isoformat()
         write_json(STATE_FILE, self.state)
+        self.write_imdb_cache()
 
     def build(self) -> None:
         log(f"[{self.elapsed()}] Build started")

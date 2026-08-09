@@ -9,6 +9,13 @@ This repository builds a fully static Nuvio/Stremio-compatible addon from public
 
 RSS is only used for discovery. DVD/Blu-ray release dates are parsed from movie pages.
 
+When Guide-Rapide fields are missing, the builder can enrich from IMDb (using the movie IMDb id):
+
+- Poster fallback
+- Synopsis fallback
+- Rating / votes fallback
+- Runtime / genres fallback
+
 ## Output
 
 The build script generates:
@@ -35,6 +42,12 @@ Optional tuning for a bigger one-time backfill:
 
 ```bash
 GR_MAX_ARCHIVE_PAGES=2000 GR_MAX_MOVIE_FETCH_PER_RUN=2500 python scripts/build_catalog.py
+```
+
+Optional tuning for production-country backfill used by the 3-month French/International catalogs:
+
+```bash
+GR_MAX_COUNTRY_BACKFILL_PER_RUN=300 GR_COUNTRY_BACKFILL_WINDOW_DAYS=180 python scripts/build_catalog.py
 ```
 
 Then open `site/manifest.json` or `site/index.html`.
@@ -67,6 +80,10 @@ Pipeline:
 Final manifest URL format:
 
 - `https://USERNAME.github.io/REPOSITORY/manifest.json`
+
+Current repository manifest URL:
+
+- `https://thomashumez.github.io/SortieDVD_x_Nuvio/manifest.json`
 
 ## Polite scraping and caching
 
