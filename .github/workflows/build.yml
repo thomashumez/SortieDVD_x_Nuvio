@@ -23,12 +23,12 @@ on:
         default: "2500"
         type: string
       wipe_cache:
-        description: "Ignore existing scraper cache and rebuild from zero"
+        description: "Ignore existing scraper cache and rebuild from zero (force fresh bootstrap)"
         required: false
         default: false
         type: boolean
       cache_namespace:
-        description: "Cache namespace version (bump to invalidate old remote caches)"
+        description: "Cache namespace version used to invalidate old remote caches"
         required: false
         default: "v2"
         type: string
