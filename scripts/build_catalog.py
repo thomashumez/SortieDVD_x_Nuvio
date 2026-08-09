@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 from xml.etree import ElementTree
 
 import requests
@@ -43,6 +43,7 @@ ARCHIVE_CACHE_TTL_HOURS = 20
 MOVIE_RECHECK_DAYS = 45
 COUNTRY_BACKFILL_WINDOW_DAYS = int(os.getenv("GR_COUNTRY_BACKFILL_WINDOW_DAYS", "150"))
 MAX_COUNTRY_BACKFILL_PER_RUN = int(os.getenv("GR_MAX_COUNTRY_BACKFILL_PER_RUN", "120"))
+IMDB_SUGGESTION_API = "https://v3.sg.media-imdb.com/suggestion"
 
 HEADERS = {
     "User-Agent": (
@@ -645,6 +646,79 @@ class GuideRapideBuilder:
         match = re.search(r"/title/(tt\d+)", imdb_link["href"])
         return match.group(1) if match else ""
 
+    def lookup_imdb_id_by_title(self, title: str, year: Optional[int]) -> str:
+        cleaned_title = normalize_text(title)
+        if not cleaned_title:
+            return ""
+
+        cache_key = f"search::{cleaned_title.lower()}::{year or ''}"
+        cached = self.imdb_cache.get(cache_key)
+        if isinstance(cached, dict):
+            imdb_id = str(cached.get("imdb_id", ""))
+            return imdb_id if re.fullmatch(r"tt\d+", imdb_id) else ""
+
+        normalized_query = strip_accents(cleaned_title).lower()
+        safe_query = re.sub(r"[^a-z0-9 ]+", " ", normalized_query)
+        safe_query = normalize_text(safe_query)
+        if not safe_query:
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        first = safe_query[0]
+        encoded_query = quote(safe_query)
+        url = f"{IMDB_SUGGESTION_API}/{first}/{encoded_query}.json"
+        raw = self.fetch_url(url)
+        if not raw:
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        candidates = payload.get("d") if isinstance(payload, dict) else None
+        if not isinstance(candidates, list):
+            self.imdb_cache[cache_key] = {"imdb_id": ""}
+            return ""
+
+        best_id = ""
+        query_norm = strip_accents(cleaned_title).lower()
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            imdb_id = str(item.get("id", ""))
+            if not re.fullmatch(r"tt\d+", imdb_id):
+                continue
+
+            item_title = normalize_text(str(item.get("l", "")))
+            if not item_title:
+                continue
+
+            item_norm = strip_accents(item_title).lower()
+            if query_norm not in item_norm and item_norm not in query_norm:
+                continue
+
+            item_year = item.get("y")
+            if isinstance(item_year, int) and year is not None and abs(item_year - year) > 1:
+                continue
+
+            best_id = imdb_id
+            break
+
+        self.imdb_cache[cache_key] = {"imdb_id": best_id}
+        return best_id
+
+    def canonical_movie_id(self, guide_rapide_id: int, imdb_id: str) -> str:
+        if imdb_id and re.fullmatch(r"tt\d+", imdb_id):
+            return imdb_id
+        return f"gr-film-{guide_rapide_id}"
+
+    def ensure_canonical_id(self, movie: Movie) -> None:
+        movie.id = self.canonical_movie_id(movie.guide_rapide_id, movie.imdb_id)
+
     def extract_production_countries(self, raw_html: str, text_blob: str) -> list[str]:
         html_match = re.search(
             r"Film\s+r[ée]alis[ée]?\s+en\s*<strong>\d{4}</strong>\s*,\s*(.+?)\s*,\s*par\s*:",
@@ -719,9 +793,12 @@ class GuideRapideBuilder:
             released_dt = dvd_dt or bluray_dt
 
         rating, voters = self.extract_rating(soup)
+        imdb_id = self.extract_imdb_id(soup)
+        if not imdb_id:
+            imdb_id = self.lookup_imdb_id_by_title(title, year)
 
         movie = Movie(
-            id=f"gr-film-{film_id}",
+            id=self.canonical_movie_id(film_id, imdb_id=imdb_id),
             source_url=url,
             guide_rapide_id=film_id,
             title=title,
@@ -735,7 +812,7 @@ class GuideRapideBuilder:
             voters=voters,
             poster=self.extract_poster(soup, url),
             trailer_url=self.extract_trailer_url(raw_html),
-            imdb_id=self.extract_imdb_id(soup),
+            imdb_id=imdb_id,
             production_countries=self.extract_production_countries(raw_html, text_blob),
             dvd_release_date=dt_to_iso(dvd_dt),
             bluray_release_date=dt_to_iso(bluray_dt),
@@ -908,11 +985,13 @@ class GuideRapideBuilder:
                 cached = Movie(**payload)
             except TypeError:
                 continue
+            self.ensure_canonical_id(cached)
             movies[cached.guide_rapide_id] = cached
 
         for film_id, url in sorted(discovered_urls.items(), reverse=True):
             cached = self.read_cached_movie(film_id)
             if cached and not self.should_recheck_movie(film_id):
+                self.ensure_canonical_id(cached)
                 if (
                     backfilled_country_count < MAX_COUNTRY_BACKFILL_PER_RUN
                     and self.needs_country_backfill(cached)
@@ -949,6 +1028,7 @@ class GuideRapideBuilder:
                     movies[film_id] = cached
                 continue
 
+            self.ensure_canonical_id(parsed)
             self.write_cached_movie(parsed)
             self.state["movies"][str(film_id)] = {
                 "checked_at": parsed.checked_at,
@@ -1110,7 +1190,7 @@ class GuideRapideBuilder:
             "background": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
             "resources": [
                 "catalog",
-                {"name": "meta", "types": ["movie"], "idPrefixes": ["gr-film-"]},
+                {"name": "meta", "types": ["movie"], "idPrefixes": ["tt", "gr-film-"]},
             ],
             "types": ["movie"],
             "catalogs": catalogs,
@@ -1156,6 +1236,13 @@ class GuideRapideBuilder:
 
         physical_movies = [m for m in movies if m.physical_available]
         physical_movies.sort(key=lambda m: (m.released, m.guide_rapide_id), reverse=True)
+
+        # Keep one entry per canonical ID so stream providers are queried consistently.
+        deduped_by_id: dict[str, Movie] = {}
+        for movie in physical_movies:
+            if movie.id not in deduped_by_id:
+                deduped_by_id[movie.id] = movie
+        physical_movies = list(deduped_by_id.values())
 
         catalog_defs, catalogs = self.build_catalogs(physical_movies)
 

@@ -30,6 +30,7 @@
     "catalog",
     {
       "idPrefixes": [
+        "tt",
         "gr-film-"
       ],
       "name": "meta",
