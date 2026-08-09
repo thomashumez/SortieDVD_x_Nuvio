@@ -19,12 +19,10 @@ The build script generates:
 
 Main catalogs:
 
-- DVD France - Nouveautes (`dvd-france-nouveautes`)
-- DVD + Blu-ray France (`dvd-bluray-france`)
-- Blu-ray France (`bluray-france`)
+- DVD 3 mois - Production francaise (`dvd-3-mois-production-francaise`)
+- DVD 3 mois - International (`dvd-3-mois-international`)
 - Toutes les sorties physiques (`toutes-sorties-physiques`)
 - Prochaines sorties (`prochaines-sorties`) when future physical release dates are present
-- Optional genre catalogs when enough items are available
 
 ## Local run
 

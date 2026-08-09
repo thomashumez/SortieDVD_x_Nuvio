@@ -6,9 +6,10 @@ import os
 import re
 import time
 import unicodedata
-from collections import Counter, deque
+import calendar
+from collections import deque
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -94,6 +95,7 @@ class Movie:
     poster: str
     trailer_url: str
     imdb_id: str
+    production_countries: list[str]
     dvd_release_date: str
     bluray_release_date: str
     release_type: str
@@ -111,12 +113,6 @@ def strip_accents(value: str) -> str:
     return "".join(
         ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)
     )
-
-
-def slugify(value: str) -> str:
-    value = strip_accents(value).lower()
-    value = re.sub(r"[^a-z0-9]+", "-", value)
-    return value.strip("-") or "genre"
 
 
 def parse_int(value: str) -> Optional[int]:
@@ -173,6 +169,14 @@ def write_json(path: Path, payload: object) -> None:
 def split_list(value: str) -> list[str]:
     parts = [normalize_text(x) for x in re.split(r"\s*,\s*", value)]
     return [x for x in parts if x]
+
+
+def subtract_months(src: date, months: int) -> date:
+    month_index = src.month - 1 - months
+    year = src.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    day = min(src.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 def log(message: str) -> None:
@@ -401,6 +405,8 @@ class GuideRapideBuilder:
         if not isinstance(payload, dict):
             return None
 
+        payload.setdefault("production_countries", [])
+
         try:
             return Movie(**payload)
         except TypeError:
@@ -609,6 +615,41 @@ class GuideRapideBuilder:
         match = re.search(r"/title/(tt\d+)", imdb_link["href"])
         return match.group(1) if match else ""
 
+    def extract_production_countries(self, raw_html: str, text_blob: str) -> list[str]:
+        html_match = re.search(
+            r"Film\s+r[ée]alis[ée]?\s+en\s*<strong>\d{4}</strong>\s*,\s*(.+?)\s*,\s*par\s*:",
+            raw_html,
+            re.IGNORECASE | re.DOTALL,
+        )
+        country_blob = ""
+        if html_match:
+            country_blob = normalize_text(re.sub(r"<[^>]+>", " ", html_match.group(1)))
+        else:
+            text_match = re.search(
+                r"Film\s+r[ée]alis[ée]?\s+en\s+\d{4}\s*,\s*(.+?)\s*,\s*par\s*:",
+                text_blob,
+                re.IGNORECASE,
+            )
+            if text_match:
+                country_blob = normalize_text(text_match.group(1))
+
+        if not country_blob:
+            return []
+
+        countries = [
+            normalize_text(part)
+            for part in re.split(r"\s*(?:/|\||;|\+|\set\s|\s&\s)\s*", country_blob, flags=re.IGNORECASE)
+            if normalize_text(part)
+        ]
+        return list(dict.fromkeys(countries))
+
+    def is_french_production(self, movie: Movie) -> bool:
+        for country in movie.production_countries:
+            normalized = strip_accents(country).lower()
+            if "france" in normalized or "francais" in normalized:
+                return True
+        return False
+
     def extract_trailer_url(self, raw_html: str) -> str:
         text = raw_html.replace("\\/", "/")
         match = re.search(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be)[^\"'<>\s]+", text)
@@ -665,6 +706,7 @@ class GuideRapideBuilder:
             poster=self.extract_poster(soup, url),
             trailer_url=self.extract_trailer_url(raw_html),
             imdb_id=self.extract_imdb_id(soup),
+            production_countries=self.extract_production_countries(raw_html, text_blob),
             dvd_release_date=dt_to_iso(dvd_dt),
             bluray_release_date=dt_to_iso(bluray_dt),
             release_type=release_type,
@@ -688,6 +730,7 @@ class GuideRapideBuilder:
             payload = read_json(movie_file, default=None)
             if not isinstance(payload, dict):
                 continue
+            payload.setdefault("production_countries", [])
             try:
                 cached = Movie(**payload)
             except TypeError:
@@ -787,7 +830,7 @@ class GuideRapideBuilder:
             "director": movie.director,
             "cast": movie.actors,
             "releaseInfo": self.release_info_text(movie),
-            "country": "France",
+            "country": " / ".join(movie.production_countries) if movie.production_countries else "",
             "language": "fr",
             "logo": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
             "links": [{"name": "Guide-Rapide", "category": "source", "url": movie.source_url}],
@@ -821,6 +864,7 @@ class GuideRapideBuilder:
 
     def build_catalogs(self, movies: list[Movie]) -> tuple[list[dict], dict[str, list[Movie]]]:
         today = datetime.now(timezone.utc).date().isoformat()
+        last_3_months_cutoff = subtract_months(datetime.now(timezone.utc).date(), 3).isoformat()
 
         physical_movies = [m for m in movies if m.physical_available]
         physical_past = [m for m in physical_movies if m.released and m.released <= today]
@@ -829,21 +873,33 @@ class GuideRapideBuilder:
         physical_past.sort(key=lambda m: m.released, reverse=True)
         physical_future.sort(key=lambda m: m.released)
 
-        dvd_past = [m for m in physical_past if m.dvd_release_date]
-        bluray_past = [m for m in physical_past if m.bluray_release_date]
-        both_past = [m for m in physical_past if m.dvd_release_date and m.bluray_release_date]
-
         catalog_defs = [
-            {"type": "movie", "id": "dvd-france-nouveautes", "name": "DVD France - Nouveautes"},
-            {"type": "movie", "id": "dvd-bluray-france", "name": "DVD + Blu-ray France"},
-            {"type": "movie", "id": "bluray-france", "name": "Blu-ray France"},
+            {
+                "type": "movie",
+                "id": "dvd-3-mois-production-francaise",
+                "name": "DVD 3 mois - Production francaise",
+            },
+            {
+                "type": "movie",
+                "id": "dvd-3-mois-international",
+                "name": "DVD 3 mois - International",
+            },
             {"type": "movie", "id": "toutes-sorties-physiques", "name": "Toutes les sorties physiques"},
         ]
 
+        dvd_recent = [
+            m
+            for m in physical_past
+            if m.dvd_release_date and m.dvd_release_date >= last_3_months_cutoff
+        ]
+        dvd_recent.sort(key=lambda m: m.dvd_release_date, reverse=True)
+
+        dvd_recent_fr = [m for m in dvd_recent if self.is_french_production(m)]
+        dvd_recent_international = [m for m in dvd_recent if not self.is_french_production(m)]
+
         catalogs: dict[str, list[Movie]] = {
-            "dvd-france-nouveautes": dvd_past,
-            "dvd-bluray-france": both_past,
-            "bluray-france": bluray_past,
+            "dvd-3-mois-production-francaise": dvd_recent_fr,
+            "dvd-3-mois-international": dvd_recent_international,
             "toutes-sorties-physiques": physical_past,
         }
 
@@ -852,24 +908,6 @@ class GuideRapideBuilder:
                 {"type": "movie", "id": "prochaines-sorties", "name": "Prochaines sorties"}
             )
             catalogs["prochaines-sorties"] = physical_future
-
-        genre_counter: Counter[str] = Counter()
-        for movie in physical_past:
-            for genre in movie.genres:
-                genre_counter[genre] += 1
-
-        genre_catalog_count = 0
-        for genre, count in genre_counter.most_common(12):
-            if count < 10:
-                continue
-            slug = slugify(genre)
-            catalog_id = f"genre-{slug}"
-            catalog_name = f"Genre - {genre}"
-            catalogs[catalog_id] = [m for m in physical_past if genre in m.genres]
-            catalog_defs.append({"type": "movie", "id": catalog_id, "name": catalog_name})
-            genre_catalog_count += 1
-            if genre_catalog_count >= 8:
-                break
 
         return catalog_defs, catalogs
 
@@ -917,7 +955,8 @@ class GuideRapideBuilder:
             "<ul>",
             '<li><a href="manifest.json">manifest.json</a></li>',
             '<li><a href="catalog/movie/toutes-sorties-physiques.json">Toutes les sorties physiques</a></li>',
-            '<li><a href="catalog/movie/dvd-france-nouveautes.json">DVD France - Nouveautes</a></li>',
+            '<li><a href="catalog/movie/dvd-3-mois-production-francaise.json">DVD 3 mois - Production francaise</a></li>',
+            '<li><a href="catalog/movie/dvd-3-mois-international.json">DVD 3 mois - International</a></li>',
             "</ul>",
             "</body>",
             "</html>",

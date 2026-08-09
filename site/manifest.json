@@ -2,18 +2,13 @@
   "background": "https://www.guide-rapide.com/IMG/divers/favicon.ico",
   "catalogs": [
     {
-      "id": "dvd-france-nouveautes",
-      "name": "DVD France - Nouveautes",
+      "id": "dvd-3-mois-production-francaise",
+      "name": "DVD 3 mois - Production francaise",
       "type": "movie"
     },
     {
-      "id": "dvd-bluray-france",
-      "name": "DVD + Blu-ray France",
-      "type": "movie"
-    },
-    {
-      "id": "bluray-france",
-      "name": "Blu-ray France",
+      "id": "dvd-3-mois-international",
+      "name": "DVD 3 mois - International",
       "type": "movie"
     },
     {
@@ -24,16 +19,6 @@
     {
       "id": "prochaines-sorties",
       "name": "Prochaines sorties",
-      "type": "movie"
-    },
-    {
-      "id": "genre-drame",
-      "name": "Genre - Drame",
-      "type": "movie"
-    },
-    {
-      "id": "genre-comedie",
-      "name": "Genre - Comédie",
       "type": "movie"
     }
   ],
