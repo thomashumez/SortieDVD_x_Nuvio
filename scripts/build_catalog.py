@@ -47,6 +47,7 @@ MOVIE_RECHECK_DAYS = 45
 COUNTRY_BACKFILL_WINDOW_DAYS = int(os.getenv("GR_COUNTRY_BACKFILL_WINDOW_DAYS", "150"))
 MAX_COUNTRY_BACKFILL_PER_RUN = int(os.getenv("GR_MAX_COUNTRY_BACKFILL_PER_RUN", "120"))
 IMDB_SUGGESTION_API = "https://v3.sg.media-imdb.com/suggestion"
+MAX_IMDB_POSTER_REFRESH_PER_RUN = int(os.getenv("GR_MAX_IMDB_POSTER_REFRESH_PER_RUN", "80"))
 
 HEADERS = {
     "User-Agent": (
@@ -114,12 +115,17 @@ class Movie:
 
 @dataclass
 class ImdbMetadata:
+    title: str = ""
+    year: Optional[int] = None
+    director: list[str] | None = None
+    actors: list[str] | None = None
     poster: str = ""
     description: str = ""
     genres: list[str] | None = None
     rating: str = ""
     voters: Optional[int] = None
     runtime: str = ""
+    trailer_url: str = ""
 
 
 def normalize_text(value: str) -> str:
@@ -195,6 +201,17 @@ def write_json(path: Path, payload: object) -> None:
 def split_list(value: str) -> list[str]:
     parts = [normalize_text(x) for x in re.split(r"\s*,\s*", value)]
     return [x for x in parts if x]
+
+
+def normalize_image_url(url: str) -> str:
+    cleaned = normalize_text(url)
+    if not cleaned:
+        return ""
+    if cleaned.startswith("http://www.guide-rapide.com/"):
+        return "https://www.guide-rapide.com/" + cleaned.removeprefix("http://www.guide-rapide.com/")
+    if cleaned.startswith("http://guide-rapide.com/"):
+        return "https://guide-rapide.com/" + cleaned.removeprefix("http://guide-rapide.com/")
+    return cleaned
 
 
 def subtract_months(src: date, months: int) -> date:
@@ -669,7 +686,7 @@ class GuideRapideBuilder:
     def extract_poster(self, soup: BeautifulSoup, page_url: str) -> str:
         og = soup.select_one('meta[property="og:image"]')
         if og and og.get("content"):
-            return urljoin(page_url, og["content"])
+            return normalize_image_url(urljoin(page_url, og["content"]))
 
         for img in soup.select("img[src]"):
             src = img.get("src") or ""
@@ -682,13 +699,13 @@ class GuideRapideBuilder:
             height = parse_int(str(img.get("height") or "")) or 0
 
             if "img/affiches/" in lowered_src:
-                return urljoin(page_url, src)
+                return normalize_image_url(urljoin(page_url, src))
             if ("sortie" in alt or "affiche" in lowered_src) and (width >= 180 or height >= 260):
-                return urljoin(page_url, src)
+                return normalize_image_url(urljoin(page_url, src))
 
         fallback = soup.select_one("img[src]")
         if fallback and fallback.get("src"):
-            return urljoin(page_url, fallback["src"])
+            return normalize_image_url(urljoin(page_url, fallback["src"]))
 
         return "https://www.guide-rapide.com/IMG/divers/favicon.ico"
 
@@ -876,7 +893,7 @@ class GuideRapideBuilder:
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
 
-        self.enrich_from_imdb_if_needed(movie)
+        self.apply_imdb_metadata(movie)
         return movie
 
     def fetch_imdb_metadata(self, imdb_id: str) -> ImdbMetadata:
@@ -952,39 +969,130 @@ class GuideRapideBuilder:
         elif isinstance(genre_raw, list):
             genres = [normalize_text(str(x)) for x in genre_raw if normalize_text(str(x))]
 
+        directors: list[str] = []
+        director_raw = data.get("director")
+        if isinstance(director_raw, dict):
+            name = normalize_text(str(director_raw.get("name") or ""))
+            if name:
+                directors.append(name)
+        elif isinstance(director_raw, list):
+            for item in director_raw:
+                if not isinstance(item, dict):
+                    continue
+                name = normalize_text(str(item.get("name") or ""))
+                if name:
+                    directors.append(name)
+
+        actors: list[str] = []
+        actor_raw = data.get("actor")
+        if isinstance(actor_raw, dict):
+            name = normalize_text(str(actor_raw.get("name") or ""))
+            if name:
+                actors.append(name)
+        elif isinstance(actor_raw, list):
+            for item in actor_raw:
+                if not isinstance(item, dict):
+                    continue
+                name = normalize_text(str(item.get("name") or ""))
+                if name:
+                    actors.append(name)
+
+        year = None
+        date_published = normalize_text(str(data.get("datePublished") or ""))
+        year_match = re.match(r"(\d{4})", date_published)
+        if year_match:
+            year = int(year_match.group(1))
+
+        trailer_url = ""
+        trailer_raw = data.get("trailer")
+        if isinstance(trailer_raw, dict):
+            trailer_url = normalize_text(
+                str(trailer_raw.get("embedUrl") or trailer_raw.get("url") or "")
+            )
+
         meta = ImdbMetadata(
-            poster=str(data.get("image") or "").strip(),
+            title=normalize_text(str(data.get("name") or "")),
+            year=year,
+            director=list(dict.fromkeys(directors)) or None,
+            actors=list(dict.fromkeys(actors)) or None,
+            poster=normalize_image_url(str(data.get("image") or "").strip()),
             description=normalize_text(str(data.get("description") or "")),
             genres=genres,
             rating=rating,
             voters=voters,
             runtime=runtime,
+            trailer_url=trailer_url,
         )
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
 
-    def enrich_from_imdb_if_needed(self, movie: Movie) -> None:
+    def apply_imdb_metadata(self, movie: Movie) -> None:
         if not movie.imdb_id:
             return
 
-        needs_poster = (not movie.poster) or ("favicon.ico" in movie.poster)
-        needs_meta = not movie.synopsis or not movie.rating or not movie.runtime or not movie.genres
-        if not needs_poster and not needs_meta:
-            return
-
         imdb = self.fetch_imdb_metadata(movie.imdb_id)
-        if needs_poster and imdb.poster:
+
+        if imdb.title:
+            movie.title = imdb.title
+        if imdb.year is not None:
+            movie.year = imdb.year
+        if imdb.director:
+            movie.director = imdb.director
+        if imdb.actors:
+            movie.actors = imdb.actors
+        if imdb.poster:
             movie.poster = imdb.poster
-        if (not movie.synopsis) and imdb.description:
+        if imdb.description:
             movie.synopsis = imdb.description
-        if (not movie.genres) and imdb.genres:
+        if imdb.genres:
             movie.genres = imdb.genres
-        if (not movie.rating) and imdb.rating:
+        if imdb.rating:
             movie.rating = imdb.rating
-        if movie.voters is None and imdb.voters is not None:
+        if imdb.voters is not None:
             movie.voters = imdb.voters
-        if (not movie.runtime) and imdb.runtime:
+        if imdb.runtime:
             movie.runtime = imdb.runtime
+        if imdb.trailer_url:
+            movie.trailer_url = imdb.trailer_url
+
+    def should_refresh_poster_from_imdb(self, movie: Movie) -> bool:
+        if not movie.imdb_id:
+            return False
+        if not movie.poster:
+            return True
+        lowered = movie.poster.lower()
+        if lowered.startswith("http://"):
+            return True
+        if "guide-rapide.com" in lowered:
+            return True
+        return False
+
+    def refresh_catalog_posters(self, catalogs: dict[str, list[Movie]]) -> int:
+        refreshed = 0
+        seen_ids: set[str] = set()
+
+        for entries in catalogs.values():
+            for movie in entries:
+                if refreshed >= MAX_IMDB_POSTER_REFRESH_PER_RUN:
+                    return refreshed
+                if movie.id in seen_ids:
+                    continue
+                seen_ids.add(movie.id)
+
+                movie.poster = normalize_image_url(movie.poster)
+                if not self.should_refresh_poster_from_imdb(movie):
+                    continue
+
+                imdb = self.fetch_imdb_metadata(movie.imdb_id)
+                if not imdb.poster:
+                    continue
+
+                if movie.poster != imdb.poster:
+                    movie.poster = imdb.poster
+                    self.write_cached_movie(movie)
+                    refreshed += 1
+
+        return refreshed
 
     def needs_country_backfill(self, movie: Movie) -> bool:
         if movie.production_countries:
@@ -1299,6 +1407,7 @@ class GuideRapideBuilder:
         physical_movies = list(deduped_by_id.values())
 
         catalog_defs, catalogs = self.build_catalogs(physical_movies)
+        refreshed_posters = self.refresh_catalog_posters(catalogs)
 
         self.clean_output_dirs()
         for catalog_id, entries in catalogs.items():
@@ -1314,6 +1423,7 @@ class GuideRapideBuilder:
         log(f"[{self.elapsed()}] Discovered movie links: {len(discovered_urls)}")
         log(f"[{self.elapsed()}] Physical movies exported: {len(physical_movies)}")
         log(f"[{self.elapsed()}] Catalogs exported: {len(catalog_defs)}")
+        log(f"[{self.elapsed()}] Catalog posters refreshed from IMDb: {refreshed_posters}")
 
 
 def main() -> int:
