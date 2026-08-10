@@ -627,26 +627,48 @@ class MetadataMixin:
         if not imdb_id:
             return ImdbMetadata()
 
+        cached_meta: Optional[ImdbMetadata] = None
         cached = self.imdb_cache.get(imdb_id)
         if isinstance(cached, dict):
             try:
                 cached_meta = ImdbMetadata(**cached)
                 if not allow_backfill:
                     return cached_meta
-                if self.metadata_provider != "omdb" or cached_meta.provider == "omdb":
-                    needs_tmdb_backfill = (
-                        not normalize_text(cached_meta.trailer_url)
-                        or not cached_meta.production_companies
-                    )
-                    if not needs_tmdb_backfill:
-                        return cached_meta
-
-                    tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
-                    merged_cached = self.merge_metadata(cached_meta, tmdb_meta)
-                    self.imdb_cache[imdb_id] = asdict(merged_cached)
-                    return merged_cached
             except TypeError:
-                pass
+                cached_meta = None
+
+        # In strict OMDb mode, prioritize poster/source completeness and avoid
+        # spending request budget on TMDb enrichment during this pass.
+        if self.metadata_provider == "omdb" and self.config.require_omdb_metadata:
+            if (
+                cached_meta
+                and cached_meta.provider == "omdb"
+                and normalize_provider_image_url(cached_meta.poster)
+            ):
+                return cached_meta
+
+            omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
+            merged_omdb = self.merge_metadata(omdb_meta, cached_meta or ImdbMetadata())
+            if merged_omdb.title or merged_omdb.poster or merged_omdb.description:
+                self.imdb_cache[imdb_id] = asdict(merged_omdb)
+                return merged_omdb
+
+            if cached_meta:
+                return cached_meta
+            return ImdbMetadata()
+
+        if cached_meta and (self.metadata_provider != "omdb" or cached_meta.provider == "omdb"):
+            needs_tmdb_backfill = (
+                not normalize_text(cached_meta.trailer_url)
+                or not cached_meta.production_companies
+            )
+            if not needs_tmdb_backfill:
+                return cached_meta
+
+            tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
+            merged_cached = self.merge_metadata(cached_meta, tmdb_meta)
+            self.imdb_cache[imdb_id] = asdict(merged_cached)
+            return merged_cached
 
         omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
         tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)

@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -222,6 +222,68 @@ class BuildCatalogTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "GR_REQUIRE_OMDB_METADATA"):
             build_catalog.GuideRapideBuilder(config=config)
+
+    def test_strict_omdb_mode_uses_cached_omdb_without_network(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="omdb",
+            require_omdb_metadata=True,
+            omdb_api_key="dummy-key",
+            omdb_api_keys_raw="",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            cached_meta = ImdbMetadata(
+                title="Cached title",
+                poster="https://m.media-amazon.com/images/poster.jpg",
+                provider="omdb",
+            )
+            builder.imdb_cache["tt1234567"] = asdict(cached_meta)
+
+            with patch.object(builder, "fetch_omdb_metadata_by_imdb_id") as fetch_omdb:
+                with patch.object(builder, "fetch_tmdb_metadata_by_imdb_id") as fetch_tmdb:
+                    metadata = builder.fetch_imdb_metadata("tt1234567", allow_backfill=True)
+
+            self.assertEqual(metadata.provider, "omdb")
+            self.assertEqual(metadata.poster, "https://m.media-amazon.com/images/poster.jpg")
+            fetch_omdb.assert_not_called()
+            fetch_tmdb.assert_not_called()
+        finally:
+            builder.close()
+
+    def test_strict_omdb_mode_repairs_missing_poster_without_tmdb(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="omdb",
+            require_omdb_metadata=True,
+            omdb_api_key="dummy-key",
+            omdb_api_keys_raw="",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            builder.imdb_cache["tt1234567"] = asdict(
+                ImdbMetadata(title="Cached title", poster="", provider="omdb")
+            )
+            repaired = ImdbMetadata(
+                title="Cached title",
+                poster="https://m.media-amazon.com/images/repaired.jpg",
+                provider="omdb",
+            )
+
+            with patch.object(
+                builder,
+                "fetch_omdb_metadata_by_imdb_id",
+                return_value=repaired,
+            ) as fetch_omdb:
+                with patch.object(builder, "fetch_tmdb_metadata_by_imdb_id") as fetch_tmdb:
+                    metadata = builder.fetch_imdb_metadata("tt1234567", allow_backfill=True)
+
+            self.assertEqual(metadata.provider, "omdb")
+            self.assertEqual(metadata.poster, "https://m.media-amazon.com/images/repaired.jpg")
+            fetch_omdb.assert_called_once_with("tt1234567")
+            fetch_tmdb.assert_not_called()
+        finally:
+            builder.close()
 
     def test_publish_replaces_previous_site_as_a_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
