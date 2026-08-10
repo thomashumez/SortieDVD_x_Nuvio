@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from dataclasses import asdict, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -420,6 +421,28 @@ class BuildCatalogTests(unittest.TestCase):
                 include_details=False,
             )
             fetch_omdb.assert_called_once_with("tt1234567")
+        finally:
+            builder.close()
+
+    def test_unresolved_imdb_cooldown_defers_retry(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            unresolved_imdb_retry_days=7,
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            now = datetime.now(timezone.utc)
+            builder.imdb_cache[builder.unresolved_imdb_cache_key("tt1234567")] = {
+                "failed_at": (now - timedelta(days=2)).isoformat(),
+                "attempts": 2,
+            }
+            self.assertTrue(builder.should_defer_unresolved_imdb("tt1234567"))
+
+            builder.imdb_cache[builder.unresolved_imdb_cache_key("tt1234567")] = {
+                "failed_at": (now - timedelta(days=10)).isoformat(),
+                "attempts": 3,
+            }
+            self.assertFalse(builder.should_defer_unresolved_imdb("tt1234567"))
         finally:
             builder.close()
 

@@ -48,6 +48,7 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         self.metadata_api_requests = 0
         self.metadata_budget_warning_emitted = False
         self.metadata_backfill_attempts = 0
+        self.metadata_deferred_unresolved = 0
         self.request_failures = 0
         self.last_http_status: Optional[int] = None
 
@@ -169,6 +170,10 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         log(
             f"[{self.elapsed()}] Metadata API lookups for poster/trailer backfill: "
             f"{metadata_api_lookups}"
+        )
+        log(
+            f"[{self.elapsed()}] Metadata backfill deferred unresolved IDs: "
+            f"{self.metadata_deferred_unresolved}"
         )
         log(f"[{self.elapsed()}] Metadata API requests total: {self.metadata_api_requests}")
         log(f"[{self.elapsed()}] Request failures: {self.request_failures}")

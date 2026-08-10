@@ -135,6 +135,7 @@ class BuildConfig:
     max_country_backfill_per_run: int
     max_imdb_poster_refresh_per_run: int
     max_metadata_api_lookups_per_run: int
+    unresolved_imdb_retry_days: int
     metadata_provider: str
     metadata_backfill_mode: str
     require_omdb_metadata: bool
@@ -164,6 +165,7 @@ class BuildConfig:
             max_country_backfill_per_run=env_int("GR_MAX_COUNTRY_BACKFILL_PER_RUN", 120),
             max_imdb_poster_refresh_per_run=env_int("GR_MAX_IMDB_POSTER_REFRESH_PER_RUN", 80),
             max_metadata_api_lookups_per_run=env_int("GR_MAX_METADATA_API_LOOKUPS_PER_RUN", 120),
+            unresolved_imdb_retry_days=env_int("GR_UNRESOLVED_IMDB_RETRY_DAYS", 7),
             metadata_provider=env_choice(
                 "GR_METADATA_PROVIDER", "auto", {"auto", "imdb", "omdb", "tmdb"}
             ),

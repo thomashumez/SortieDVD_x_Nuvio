@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -13,12 +14,53 @@ from .models import ImdbMetadata, Movie
 from .utils import (
     normalize_provider_image_url,
     normalize_text,
+    parse_timestamp,
     parse_int,
     split_list,
     strip_accents,
 )
 
 class MetadataMixin:
+
+    def unresolved_imdb_cache_key(self, imdb_id: str) -> str:
+        return f"unresolved_imdb::{imdb_id}"
+
+    def should_defer_unresolved_imdb(self, imdb_id: str) -> bool:
+        if not imdb_id:
+            return False
+        cooldown_days = max(0, int(self.config.unresolved_imdb_retry_days))
+        if cooldown_days <= 0:
+            return False
+
+        marker = self.imdb_cache.get(self.unresolved_imdb_cache_key(imdb_id))
+        if not isinstance(marker, dict):
+            return False
+
+        failed_at = str(marker.get("failed_at") or "")
+        failed_dt = parse_timestamp(failed_at)
+        if not failed_dt:
+            return False
+
+        age_days = (datetime.now(timezone.utc) - failed_dt).total_seconds() / 86400
+        return age_days < cooldown_days
+
+    def mark_unresolved_imdb(self, imdb_id: str) -> None:
+        if not imdb_id:
+            return
+        key = self.unresolved_imdb_cache_key(imdb_id)
+        marker = self.imdb_cache.get(key)
+        attempts = 0
+        if isinstance(marker, dict):
+            attempts = int(marker.get("attempts") or 0)
+        self.imdb_cache[key] = {
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "attempts": attempts + 1,
+        }
+
+    def clear_unresolved_imdb(self, imdb_id: str) -> None:
+        if not imdb_id:
+            return
+        self.imdb_cache.pop(self.unresolved_imdb_cache_key(imdb_id), None)
 
     def merge_metadata(self, primary: ImdbMetadata, secondary: ImdbMetadata) -> ImdbMetadata:
         return ImdbMetadata(
@@ -1052,12 +1094,25 @@ class MetadataMixin:
                         movie.imdb_id = resolved_imdb_id
                         movie.id = self.canonical_movie_id(movie.guide_rapide_id, resolved_imdb_id)
 
+                if movie.imdb_id and self.should_defer_unresolved_imdb(movie.imdb_id):
+                    self.metadata_deferred_unresolved += 1
+                    continue
+
                 movie.poster = normalize_provider_image_url(movie.poster)
                 if not self.should_backfill_metadata(movie):
                     continue
 
                 self.metadata_backfill_attempts += 1
                 changed = self.apply_imdb_metadata(movie, allow_network=True)
+
+                has_metadata_source = bool(normalize_text(movie.metadata_source))
+                has_poster = bool(normalize_provider_image_url(movie.poster))
+                if movie.imdb_id:
+                    if has_metadata_source and has_poster:
+                        self.clear_unresolved_imdb(movie.imdb_id)
+                    else:
+                        self.mark_unresolved_imdb(movie.imdb_id)
+
                 if changed:
                     self.write_cached_movie(movie)
                     refreshed += 1
