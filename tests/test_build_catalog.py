@@ -78,6 +78,19 @@ class BuildCatalogTests(unittest.TestCase):
         finally:
             builder.close()
 
+    def test_metadata_budget_zero_is_unlimited(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            max_metadata_api_lookups_per_run=0,
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            for _ in range(20):
+                self.assertTrue(builder.reserve_request_budget("metadata_api"))
+            self.assertEqual(builder.metadata_api_requests, 20)
+        finally:
+            builder.close()
+
     def test_guide_rapide_host_matching_does_not_accept_lookalikes(self) -> None:
         builder = build_catalog.GuideRapideBuilder()
         try:

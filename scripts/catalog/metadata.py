@@ -1080,9 +1080,15 @@ class MetadataMixin:
 
         for entries in catalogs.values():
             for movie in entries:
-                if refreshed >= self.config.max_imdb_poster_refresh_per_run:
+                if (
+                    self.config.max_imdb_poster_refresh_per_run > 0
+                    and refreshed >= self.config.max_imdb_poster_refresh_per_run
+                ):
                     return refreshed, self.metadata_backfill_attempts
-                if self.metadata_api_requests >= self.config.max_metadata_api_lookups_per_run:
+                if (
+                    self.config.max_metadata_api_lookups_per_run > 0
+                    and self.metadata_api_requests >= self.config.max_metadata_api_lookups_per_run
+                ):
                     return refreshed, self.metadata_backfill_attempts
                 if movie.id in seen_ids:
                     continue

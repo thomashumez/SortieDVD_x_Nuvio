@@ -92,6 +92,10 @@ class HttpMixin:
     def reserve_request_budget(self, bucket: str) -> bool:
         if bucket != "metadata_api":
             return True
+        # 0 means unlimited metadata API budget for the run.
+        if self.config.max_metadata_api_lookups_per_run <= 0:
+            self.metadata_api_requests += 1
+            return True
         if self.metadata_api_requests >= self.config.max_metadata_api_lookups_per_run:
             if not self.metadata_budget_warning_emitted:
                 log(
