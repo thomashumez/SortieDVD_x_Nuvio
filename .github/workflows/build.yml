@@ -37,7 +37,7 @@ on:
         default: false
         type: boolean
   schedule:
-    - cron: "17 0-6 * * *"
+    - cron: "17 2 * * *"
   push:
     branches:
       - main
@@ -68,31 +68,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Nightly randomized slot gate
+      - name: Nightly schedule gate
         id: nightly_gate
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" != "schedule" ]]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Not a scheduled run, build will execute."
-            exit 0
-          fi
-
-          current_hour=$(date -u +%H)
-          current_hour=$((10#$current_hour))
-          seed="$(date -u +%F)-${{ github.repository }}"
-          digest=$(printf "%s" "$seed" | sha256sum | cut -c1-8)
-          target_hour=$((16#$digest % 7))
-
-          echo "Scheduled run hour (UTC): $current_hour"
-          echo "Selected pseudo-random hour (UTC): $target_hour"
-
-          if [[ "$current_hour" -eq "$target_hour" ]]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Nightly slot matched, running build."
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "Scheduled run accepted at fixed nightly slot (02:17 UTC)."
           else
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "Nightly slot not matched, skipping build for this trigger."
+            echo "Not a scheduled run, build will execute."
           fi
 
       - name: Setup Python
