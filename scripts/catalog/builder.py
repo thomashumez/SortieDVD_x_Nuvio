@@ -136,6 +136,7 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
             self.write_index(
                 total_movies=len(physical_movies),
                 discovered_count=len(discovered_urls),
+                catalogs=catalog_defs,
             )
             self.validate_output(catalog_defs, physical_movies)
             self.publish_output(self.output_root)

@@ -179,7 +179,39 @@ class OutputMixin:
         }
         write_json(self.output_root / "manifest.json", manifest)
 
-    def write_index(self, total_movies: int, discovered_count: int) -> None:
+    def write_index(
+        self,
+        total_movies: int,
+        discovered_count: int,
+        catalogs: list[dict],
+    ) -> None:
+        catalog_name_by_id: dict[str, str] = {}
+        ordered_catalog_ids: list[str] = []
+        for catalog in catalogs:
+            catalog_id = str(catalog.get("id", "")).strip()
+            if not catalog_id:
+                continue
+            if catalog_id not in ordered_catalog_ids:
+                ordered_catalog_ids.append(catalog_id)
+            catalog_name = str(catalog.get("name", catalog_id)).strip() or catalog_id
+            catalog_name_by_id[catalog_id] = catalog_name
+
+        generated_catalog_ids = [
+            path.stem
+            for path in sorted((self.output_root / "catalog" / "movie").glob("*.json"))
+            if path.stem
+        ]
+        for catalog_id in generated_catalog_ids:
+            if catalog_id not in ordered_catalog_ids:
+                ordered_catalog_ids.append(catalog_id)
+
+        catalog_links = []
+        for catalog_id in ordered_catalog_ids:
+            catalog_name = catalog_name_by_id.get(catalog_id, catalog_id.replace("-", " ").title())
+            catalog_links.append(
+                f'<li><a href="catalog/movie/{catalog_id}.json">{catalog_name}</a></li>'
+            )
+
         html = [
             "<!doctype html>",
             '<html lang="fr">',
@@ -196,8 +228,7 @@ class OutputMixin:
             f"<p>Liens films decouverts pendant le crawl: <strong>{discovered_count}</strong></p>",
             "<ul>",
             '<li><a href="manifest.json">manifest.json</a></li>',
-            '<li><a href="catalog/movie/dvd-12-mois-production-francaise.json">DVD 12 mois - Production francaise</a></li>',
-            '<li><a href="catalog/movie/dvd-12-mois-international.json">DVD 12 mois - International</a></li>',
+            *catalog_links,
             "</ul>",
             "</body>",
             "</html>",
