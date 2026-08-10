@@ -126,6 +126,23 @@ class BuildCatalogTests(unittest.TestCase):
         self.assertEqual(normalize_provider_image_url("na"), "")
         self.assertEqual(normalize_provider_image_url("None"), "")
 
+    def test_trailer_is_serialized_with_youtube_id(self) -> None:
+        builder = build_catalog.GuideRapideBuilder()
+        try:
+            movie = self.make_movie()
+            movie.trailer_url = "https://www.youtube.com/watch?v=3EssobOi3wE"
+
+            meta = builder.to_meta(movie)
+            self.assertEqual(meta.get("trailers"), [{"source": "3EssobOi3wE", "type": "Trailer"}])
+
+            movie.trailer_url = "https://www.youtube.com/results?search_query=movie+trailer"
+            meta = builder.to_meta(movie)
+            self.assertNotIn("trailers", meta)
+            trailer_links = [item for item in meta.get("links", []) if item.get("category") == "trailer"]
+            self.assertEqual(len(trailer_links), 1)
+        finally:
+            builder.close()
+
     def test_omdb_metadata_sets_provider_and_poster(self) -> None:
         builder = build_catalog.GuideRapideBuilder()
         try:

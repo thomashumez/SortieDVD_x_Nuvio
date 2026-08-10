@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from .config import OUTPUT_DIR, STATE_FILE
 from .models import Movie
@@ -19,6 +20,24 @@ from .utils import (
 )
 
 class OutputMixin:
+
+    def extract_youtube_video_id(self, url: str) -> str:
+        parsed = urlparse((url or "").strip())
+        host = (parsed.hostname or "").lower()
+
+        if host.endswith("youtu.be"):
+            return parsed.path.lstrip("/").split("/", 1)[0]
+
+        if host.endswith("youtube.com"):
+            if parsed.path == "/watch":
+                query = parse_qs(parsed.query)
+                return (query.get("v") or [""])[0]
+            if parsed.path.startswith("/shorts/"):
+                return parsed.path.split("/", 2)[2].split("/", 1)[0]
+            if parsed.path.startswith("/embed/"):
+                return parsed.path.split("/", 2)[2].split("/", 1)[0]
+
+        return ""
 
     def release_info_text(self, movie: Movie) -> str:
         parts = []
@@ -108,7 +127,19 @@ class OutputMixin:
                 }
             )
         if movie.trailer_url:
-            meta["trailers"] = [{"source": "youtube", "type": "Trailer", "url": movie.trailer_url}]
+            youtube_id = self.extract_youtube_video_id(movie.trailer_url)
+            if youtube_id:
+                # Stremio/Nuvio trailer objects expect a YouTube video ID in `source`.
+                meta["trailers"] = [{"source": youtube_id, "type": "Trailer"}]
+            else:
+                # Keep discoverability for non-direct YouTube links (e.g. search URLs).
+                meta["links"].append(
+                    {
+                        "name": "Trailer",
+                        "category": "trailer",
+                        "url": movie.trailer_url,
+                    }
+                )
 
         return meta
 
