@@ -139,8 +139,8 @@ jobs:
           GR_FULL_ARCHIVE_PAGES: ${{ inputs.full_archive_pages || '4000' }}
           GR_FULL_MOVIE_FETCH_PER_RUN: ${{ inputs.full_movie_fetch || '2500' }}
           GR_METADATA_BACKFILL_MODE: ${{ inputs.metadata_backfill_mode || 'smart' }}
-          GR_METADATA_PROVIDER: "omdb"
-          GR_REQUIRE_OMDB_METADATA: "true"
+          GR_METADATA_PROVIDER: "tmdb"
+          GR_REQUIRE_OMDB_METADATA: "false"
           GR_MAX_IMDB_POSTER_REFRESH_PER_RUN: "600"
           GR_MAX_METADATA_API_LOOKUPS_PER_RUN: "600"
           GR_OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}

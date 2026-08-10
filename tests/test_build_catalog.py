@@ -332,6 +332,51 @@ class BuildCatalogTests(unittest.TestCase):
         finally:
             builder.close()
 
+    def test_tmdb_first_mode_prefers_tmdb_and_falls_back_to_omdb(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="tmdb",
+            require_omdb_metadata=False,
+            tmdb_api_key="dummy-tmdb",
+            omdb_api_key="dummy-omdb",
+            omdb_api_keys_raw="",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            tmdb_meta = ImdbMetadata(
+                title="Title TMDb",
+                poster="https://image.tmdb.org/t/p/w780/from-tmdb.jpg",
+                description="",
+                provider="tmdb",
+            )
+            omdb_meta = ImdbMetadata(
+                title="Title OMDb",
+                poster="https://m.media-amazon.com/images/from-omdb.jpg",
+                description="Plot from OMDb",
+                provider="omdb",
+            )
+
+            with patch.object(
+                builder,
+                "fetch_tmdb_metadata_by_imdb_id",
+                return_value=tmdb_meta,
+            ) as fetch_tmdb:
+                with patch.object(
+                    builder,
+                    "fetch_omdb_metadata_by_imdb_id",
+                    return_value=omdb_meta,
+                ) as fetch_omdb:
+                    metadata = builder.fetch_imdb_metadata("tt1234567", allow_backfill=True)
+
+            self.assertEqual(metadata.provider, "tmdb")
+            self.assertEqual(metadata.title, "Title TMDb")
+            self.assertEqual(metadata.poster, "https://image.tmdb.org/t/p/w780/from-tmdb.jpg")
+            self.assertEqual(metadata.description, "Plot from OMDb")
+            fetch_tmdb.assert_called_once_with("tt1234567", allow_when_omdb=True)
+            fetch_omdb.assert_called_once_with("tt1234567")
+        finally:
+            builder.close()
+
     def test_publish_replaces_previous_site_as_a_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

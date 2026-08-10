@@ -639,6 +639,11 @@ class MetadataMixin:
         if isinstance(cached, dict):
             try:
                 cached_meta = ImdbMetadata(**cached)
+                normalized_cached_poster = normalize_provider_image_url(cached_meta.poster)
+                if cached_meta.poster != normalized_cached_poster:
+                    cached_payload = asdict(cached_meta)
+                    cached_payload["poster"] = normalized_cached_poster
+                    cached_meta = ImdbMetadata(**cached_payload)
                 if not allow_backfill:
                     return cached_meta
             except TypeError:
@@ -694,10 +699,14 @@ class MetadataMixin:
             self.imdb_cache[imdb_id] = asdict(merged_cached)
             return merged_cached
 
-        omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
-        tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
-
-        merged = self.merge_metadata(omdb_meta, tmdb_meta)
+        if self.metadata_provider == "tmdb":
+            tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id, allow_when_omdb=True)
+            omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
+            merged = self.merge_metadata(tmdb_meta, omdb_meta)
+        else:
+            omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
+            tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)
+            merged = self.merge_metadata(omdb_meta, tmdb_meta)
 
         if merged.title or merged.poster or merged.description or merged.trailer_url:
             self.imdb_cache[imdb_id] = asdict(merged)

@@ -11,6 +11,7 @@ from .config import OUTPUT_DIR, STATE_FILE
 from .models import Movie
 from .utils import (
     atomic_write_text,
+    log,
     normalize_provider_image_url,
     read_json,
     subtract_months,
@@ -269,31 +270,30 @@ class OutputMixin:
             if payload["meta"].get("id") != movie.id:
                 raise RuntimeError(f"Generated metadata id mismatch: {movie.id}")
 
-        if self.config.require_omdb_metadata:
-            missing: list[tuple[str, str]] = []
-            for movie in movies:
-                provider_ok = movie.metadata_source == "omdb"
-                poster_ok = bool(normalize_provider_image_url(movie.poster))
-                if provider_ok and poster_ok:
-                    continue
+        missing: list[tuple[str, str]] = []
+        for movie in movies:
+            provider_ok = bool(movie.metadata_source)
+            poster_ok = bool(normalize_provider_image_url(movie.poster))
+            if provider_ok and poster_ok:
+                continue
 
-                reasons = []
-                if not provider_ok:
-                    source = movie.metadata_source or "none"
-                    reasons.append(f"source={source}")
-                if not poster_ok:
-                    reasons.append("poster=missing")
-                missing.append((movie.id, "+".join(reasons)))
+            reasons = []
+            if not provider_ok:
+                source = movie.metadata_source or "none"
+                reasons.append(f"source={source}")
+            if not poster_ok:
+                reasons.append("poster=missing")
+            missing.append((movie.id, "+".join(reasons)))
 
-            if missing:
-                sample = ", ".join(f"{movie_id}({reason})" for movie_id, reason in missing[:10])
-                suffix = "..." if len(missing) > 10 else ""
-                raise RuntimeError(
-                    "OMDb metadata/poster coverage is incomplete: "
-                    f"{len(missing)}/{len(movies)} missing ({sample}{suffix}); "
-                    f"metadata_api_requests={self.metadata_api_requests}/"
-                    f"{self.config.max_metadata_api_lookups_per_run}"
-                )
+        if missing:
+            sample = ", ".join(f"{movie_id}({reason})" for movie_id, reason in missing[:20])
+            suffix = "..." if len(missing) > 20 else ""
+            log(
+                f"[{self.elapsed()}] Warning: metadata/poster coverage incomplete: "
+                f"{len(missing)}/{len(movies)} missing ({sample}{suffix}); "
+                f"metadata_api_requests={self.metadata_api_requests}/"
+                f"{self.config.max_metadata_api_lookups_per_run}"
+            )
 
     def publish_output(self, staging_dir: Path) -> None:
         """Atomically replace the previous generated site after validation."""
