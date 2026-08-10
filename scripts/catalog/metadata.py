@@ -9,7 +9,7 @@ from urllib.parse import quote
 from bs4 import BeautifulSoup
 
 from .config import IMDB_SUGGESTION_API, OMDB_API_URL, TMDB_API_URL
-from .models import ImdbMetadata
+from .models import ImdbMetadata, Movie
 from .utils import (
     normalize_provider_image_url,
     normalize_text,
@@ -441,49 +441,95 @@ class MetadataMixin:
             imdb_id = str(cached.get("imdb_id", ""))
             return imdb_id if re.fullmatch(r"tt\d+", imdb_id) else ""
 
-        params = {"query": cleaned_title, "include_adult": "false"}
-        if year is not None:
-            params["year"] = str(year)
-
-        search_payload = self.fetch_tmdb_json("/search/movie", params=params)
-        if not search_payload:
-            self.imdb_cache[cache_key] = {"imdb_id": ""}
-            return ""
-
-        results = search_payload.get("results")
-        if not isinstance(results, list):
-            self.imdb_cache[cache_key] = {"imdb_id": ""}
-            return ""
-
         query_norm = strip_accents(cleaned_title).lower()
-        for item in results[:6]:
-            if not isinstance(item, dict):
-                continue
 
-            movie_id = item.get("id")
-            if not isinstance(movie_id, int):
-                continue
+        # Try language-aware searches first, then fallback to language-neutral.
+        search_attempts: list[tuple[str, str]] = [(cleaned_title, "fr-FR")]
+        if strip_accents(cleaned_title) != cleaned_title:
+            search_attempts.append((strip_accents(cleaned_title), "fr-FR"))
+        search_attempts.append((cleaned_title, "en-US"))
+        search_attempts.append((cleaned_title, ""))
 
-            candidate_title = normalize_text(str(item.get("title") or ""))
-            candidate_norm = strip_accents(candidate_title).lower()
-            if candidate_norm and query_norm not in candidate_norm and candidate_norm not in query_norm:
+        seen_attempts: set[tuple[str, str]] = set()
+        for search_query, language in search_attempts:
+            key = (search_query, language)
+            if key in seen_attempts:
                 continue
+            seen_attempts.add(key)
 
+            params = {"query": search_query, "include_adult": "false"}
             if year is not None:
-                release_date = normalize_text(str(item.get("release_date") or ""))
-                year_match = re.match(r"(\d{4})", release_date)
-                if year_match and abs(int(year_match.group(1)) - year) > 1:
-                    continue
+                params["year"] = str(year)
+            if language:
+                params["language"] = language
 
-            external = self.fetch_tmdb_json(f"/movie/{movie_id}/external_ids")
-            if not isinstance(external, dict):
-                continue
-            imdb_id = normalize_text(str(external.get("imdb_id") or ""))
-            if not re.fullmatch(r"tt\d+", imdb_id):
+            search_payload = self.fetch_tmdb_json(
+                "/search/movie",
+                params=params,
+                include_default_language=False,
+            )
+            if not search_payload:
                 continue
 
-            self.imdb_cache[cache_key] = {"imdb_id": imdb_id}
-            return imdb_id
+            results = search_payload.get("results")
+            if not isinstance(results, list):
+                continue
+
+            query_tokens = {
+                token
+                for token in re.findall(r"[a-z0-9]+", query_norm)
+                if len(token) >= 4
+            }
+
+            # Pass 1: strict title containment.
+            # Pass 2: relaxed token overlap to survive translated FR titles.
+            for strict in (True, False):
+                for item in results[:10]:
+                    if not isinstance(item, dict):
+                        continue
+
+                    movie_id = item.get("id")
+                    if not isinstance(movie_id, int):
+                        continue
+
+                    candidate_title = normalize_text(str(item.get("title") or ""))
+                    candidate_original = normalize_text(str(item.get("original_title") or ""))
+                    candidate_norm = strip_accents(candidate_title).lower()
+                    candidate_original_norm = strip_accents(candidate_original).lower()
+
+                    if strict:
+                        if candidate_norm and query_norm not in candidate_norm and candidate_norm not in query_norm:
+                            continue
+                    else:
+                        candidate_tokens = {
+                            token
+                            for token in re.findall(
+                                r"[a-z0-9]+",
+                                f"{candidate_norm} {candidate_original_norm}",
+                            )
+                            if len(token) >= 4
+                        }
+                        if query_tokens and not (query_tokens & candidate_tokens):
+                            continue
+
+                    if year is not None:
+                        release_date = normalize_text(str(item.get("release_date") or ""))
+                        year_match = re.match(r"(\d{4})", release_date)
+                        if year_match and abs(int(year_match.group(1)) - year) > 1:
+                            continue
+
+                    external = self.fetch_tmdb_json(
+                        f"/movie/{movie_id}/external_ids",
+                        include_default_language=False,
+                    )
+                    if not isinstance(external, dict):
+                        continue
+                    imdb_id = normalize_text(str(external.get("imdb_id") or ""))
+                    if not re.fullmatch(r"tt\d+", imdb_id):
+                        continue
+
+                    self.imdb_cache[cache_key] = {"imdb_id": imdb_id}
+                    return imdb_id
 
         self.imdb_cache[cache_key] = {"imdb_id": ""}
         return ""
@@ -505,6 +551,7 @@ class MetadataMixin:
         self,
         imdb_id: str,
         allow_when_omdb: bool = False,
+        include_details: bool = True,
     ) -> ImdbMetadata:
         if not self.should_use_tmdb(allow_when_omdb=allow_when_omdb) or not re.fullmatch(r"tt\d+", imdb_id):
             return ImdbMetadata()
@@ -528,6 +575,11 @@ class MetadataMixin:
         movie_id = first.get("id")
         if not isinstance(movie_id, int):
             return ImdbMetadata()
+
+        if not include_details:
+            meta = self.tmdb_payload_to_metadata(first)
+            self.imdb_cache[imdb_id] = asdict(meta)
+            return meta
 
         details = self.fetch_tmdb_json(
             f"/movie/{movie_id}",
@@ -674,6 +726,7 @@ class MetadataMixin:
                 tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(
                     imdb_id,
                     allow_when_omdb=True,
+                    include_details=False,
                 )
                 merged_omdb = self.merge_metadata(omdb_meta_clean, tmdb_meta)
 
@@ -700,9 +753,16 @@ class MetadataMixin:
             return merged_cached
 
         if self.metadata_provider == "tmdb":
-            tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id, allow_when_omdb=True)
-            omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
-            merged = self.merge_metadata(tmdb_meta, omdb_meta)
+            tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(
+                imdb_id,
+                allow_when_omdb=True,
+                include_details=False,
+            )
+            if normalize_provider_image_url(tmdb_meta.poster):
+                merged = tmdb_meta
+            else:
+                omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
+                merged = self.merge_metadata(tmdb_meta, omdb_meta)
         else:
             omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
             tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(imdb_id)

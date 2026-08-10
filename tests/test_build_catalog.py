@@ -328,11 +328,15 @@ class BuildCatalogTests(unittest.TestCase):
             self.assertEqual(metadata.provider, "omdb")
             self.assertEqual(metadata.poster, "https://image.tmdb.org/t/p/w780/poster.jpg")
             fetch_omdb.assert_called_once_with("tt1234567")
-            fetch_tmdb.assert_called_once_with("tt1234567", allow_when_omdb=True)
+            fetch_tmdb.assert_called_once_with(
+                "tt1234567",
+                allow_when_omdb=True,
+                include_details=False,
+            )
         finally:
             builder.close()
 
-    def test_tmdb_first_mode_prefers_tmdb_and_falls_back_to_omdb(self) -> None:
+    def test_tmdb_first_mode_prefers_tmdb_and_skips_omdb_when_poster_exists(self) -> None:
         config = replace(
             build_catalog.BuildConfig.from_env(),
             metadata_provider="tmdb",
@@ -346,13 +350,53 @@ class BuildCatalogTests(unittest.TestCase):
             tmdb_meta = ImdbMetadata(
                 title="Title TMDb",
                 poster="https://image.tmdb.org/t/p/w780/from-tmdb.jpg",
-                description="",
+                description="Plot from TMDb",
+                provider="tmdb",
+            )
+
+            with patch.object(
+                builder,
+                "fetch_tmdb_metadata_by_imdb_id",
+                return_value=tmdb_meta,
+            ) as fetch_tmdb:
+                with patch.object(
+                    builder,
+                    "fetch_omdb_metadata_by_imdb_id",
+                ) as fetch_omdb:
+                    metadata = builder.fetch_imdb_metadata("tt1234567", allow_backfill=True)
+
+            self.assertEqual(metadata.provider, "tmdb")
+            self.assertEqual(metadata.title, "Title TMDb")
+            self.assertEqual(metadata.poster, "https://image.tmdb.org/t/p/w780/from-tmdb.jpg")
+            self.assertEqual(metadata.description, "Plot from TMDb")
+            fetch_tmdb.assert_called_once_with(
+                "tt1234567",
+                allow_when_omdb=True,
+                include_details=False,
+            )
+            fetch_omdb.assert_not_called()
+        finally:
+            builder.close()
+
+    def test_tmdb_first_mode_falls_back_to_omdb_when_tmdb_poster_missing(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="tmdb",
+            require_omdb_metadata=False,
+            tmdb_api_key="dummy-tmdb",
+            omdb_api_key="dummy-omdb",
+            omdb_api_keys_raw="",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            tmdb_meta = ImdbMetadata(
+                title="Title TMDb",
+                poster="",
                 provider="tmdb",
             )
             omdb_meta = ImdbMetadata(
                 title="Title OMDb",
                 poster="https://m.media-amazon.com/images/from-omdb.jpg",
-                description="Plot from OMDb",
                 provider="omdb",
             )
 
@@ -369,10 +413,12 @@ class BuildCatalogTests(unittest.TestCase):
                     metadata = builder.fetch_imdb_metadata("tt1234567", allow_backfill=True)
 
             self.assertEqual(metadata.provider, "tmdb")
-            self.assertEqual(metadata.title, "Title TMDb")
-            self.assertEqual(metadata.poster, "https://image.tmdb.org/t/p/w780/from-tmdb.jpg")
-            self.assertEqual(metadata.description, "Plot from OMDb")
-            fetch_tmdb.assert_called_once_with("tt1234567", allow_when_omdb=True)
+            self.assertEqual(metadata.poster, "https://m.media-amazon.com/images/from-omdb.jpg")
+            fetch_tmdb.assert_called_once_with(
+                "tt1234567",
+                allow_when_omdb=True,
+                include_details=False,
+            )
             fetch_omdb.assert_called_once_with("tt1234567")
         finally:
             builder.close()
