@@ -22,6 +22,16 @@ on:
         required: false
         default: "2500"
         type: string
+      incremental_archive_pages:
+        description: "Only for incremental mode: archive pages limit"
+        required: false
+        default: "150"
+        type: string
+      incremental_movie_fetch:
+        description: "Only for incremental mode: movie fetch limit"
+        required: false
+        default: "100"
+        type: string
       metadata_backfill_mode:
         description: "Metadata backfill strategy (off=disable, smart=missing poster/trailer, deep=recheck all cached items up to cap)"
         required: false
@@ -140,6 +150,8 @@ jobs:
           GR_DISCOVERY_MODE: ${{ steps.resolve_mode.outputs.discovery_mode }}
           GR_FULL_ARCHIVE_PAGES: ${{ inputs.full_archive_pages || '4000' }}
           GR_FULL_MOVIE_FETCH_PER_RUN: ${{ inputs.full_movie_fetch || '2500' }}
+          GR_INCREMENTAL_ARCHIVE_PAGES: ${{ inputs.incremental_archive_pages || '150' }}
+          GR_INCREMENTAL_MOVIE_FETCH_PER_RUN: ${{ inputs.incremental_movie_fetch || '100' }}
           GR_METADATA_BACKFILL_MODE: ${{ inputs.metadata_backfill_mode || 'smart' }}
           GR_METADATA_PROVIDER: "tmdb"
           GR_REQUIRE_OMDB_METADATA: "false"
