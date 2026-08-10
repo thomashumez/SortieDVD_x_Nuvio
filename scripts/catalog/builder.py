@@ -117,7 +117,9 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         physical_movies = list(deduped_by_id.values())
 
         catalog_defs, catalogs = self.build_catalogs(physical_movies)
-        refreshed_posters, metadata_api_lookups = self.refresh_catalog_posters(catalogs)
+        refresh_targets = dict(catalogs)
+        refresh_targets["__all_physical_movies__"] = physical_movies
+        refreshed_posters, metadata_api_lookups = self.refresh_catalog_posters(refresh_targets)
 
         # Persist refreshed IMDb metadata cache before output validation.
         # This prevents repeated misses across runs when strict validation fails.
