@@ -119,6 +119,10 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         catalog_defs, catalogs = self.build_catalogs(physical_movies)
         refreshed_posters, metadata_api_lookups = self.refresh_catalog_posters(catalogs)
 
+        # Persist refreshed IMDb metadata cache before output validation.
+        # This prevents repeated misses across runs when strict validation fails.
+        self.write_imdb_cache()
+
         with tempfile.TemporaryDirectory(
             prefix=".site-build-", dir=OUTPUT_DIR.parent
         ) as temporary_output:

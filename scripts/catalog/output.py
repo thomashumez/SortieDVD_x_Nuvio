@@ -270,18 +270,29 @@ class OutputMixin:
                 raise RuntimeError(f"Generated metadata id mismatch: {movie.id}")
 
         if self.config.require_omdb_metadata:
-            missing = [
-                movie.id
-                for movie in movies
-                if movie.metadata_source != "omdb"
-                or not normalize_provider_image_url(movie.poster)
-            ]
+            missing: list[tuple[str, str]] = []
+            for movie in movies:
+                provider_ok = movie.metadata_source == "omdb"
+                poster_ok = bool(normalize_provider_image_url(movie.poster))
+                if provider_ok and poster_ok:
+                    continue
+
+                reasons = []
+                if not provider_ok:
+                    source = movie.metadata_source or "none"
+                    reasons.append(f"source={source}")
+                if not poster_ok:
+                    reasons.append("poster=missing")
+                missing.append((movie.id, "+".join(reasons)))
+
             if missing:
-                sample = ", ".join(missing[:10])
+                sample = ", ".join(f"{movie_id}({reason})" for movie_id, reason in missing[:10])
                 suffix = "..." if len(missing) > 10 else ""
                 raise RuntimeError(
                     "OMDb metadata/poster coverage is incomplete: "
-                    f"{len(missing)}/{len(movies)} missing ({sample}{suffix})"
+                    f"{len(missing)}/{len(movies)} missing ({sample}{suffix}); "
+                    f"metadata_api_requests={self.metadata_api_requests}/"
+                    f"{self.config.max_metadata_api_lookups_per_run}"
                 )
 
     def publish_output(self, staging_dir: Path) -> None:
