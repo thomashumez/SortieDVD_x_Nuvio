@@ -40,14 +40,11 @@ class OutputMixin:
         return ""
 
     def release_info_text(self, movie: Movie) -> str:
-        parts = []
         if movie.dvd_release_date:
-            parts.append(f"DVD: {movie.dvd_release_date}")
+            return movie.dvd_release_date
         if movie.bluray_release_date:
-            parts.append(f"Blu-ray: {movie.bluray_release_date}")
-        if movie.year:
-            parts.append(f"Production: {movie.year}")
-        return " | ".join(parts)
+            return movie.bluray_release_date
+        return movie.released or ""
 
     def to_meta_preview(self, movie: Movie) -> dict:
         poster = normalize_provider_image_url(movie.poster)
