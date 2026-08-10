@@ -87,11 +87,13 @@ jobs:
 
       - name: Restore scraper cache
         if: steps.nightly_gate.outputs.should_run == 'true' && inputs.wipe_cache != true
-        uses: actions/cache@v4
+        id: restore_scraper_cache
+        uses: actions/cache/restore@v4
         with:
           path: data/cache
-          key: ${{ runner.os }}-guide-rapide-cache-${{ github.ref_name }}
+          key: ${{ runner.os }}-guide-rapide-cache-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-guide-rapide-cache-${{ github.ref_name }}-
             ${{ runner.os }}-guide-rapide-cache-
 
       - name: Wipe local scraper cache
@@ -153,6 +155,13 @@ jobs:
           GR_METADATA_API_DELAY_SECONDS: "0.1"
           GR_METADATA_API_TIMEOUT: "20"
         run: python -u scripts/build_catalog.py
+
+      - name: Save scraper cache
+        if: always() && steps.nightly_gate.outputs.should_run == 'true' && inputs.wipe_cache != true
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-guide-rapide-cache-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Setup Pages
         if: steps.nightly_gate.outputs.should_run == 'true'

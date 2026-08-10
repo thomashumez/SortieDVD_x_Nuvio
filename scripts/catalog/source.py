@@ -335,6 +335,9 @@ class SourceMixin:
         skipped_due_to_cap = 0
         backfilled_country_count = 0
         imdb_rehydrated_cache_count = 0
+        cached_fresh_hits = 0
+        parse_failures = 0
+        fetch_failures = 0
 
         log(f"[{self.elapsed()}] Movie phase start: discovered_urls={len(discovered_urls)}")
 
@@ -364,6 +367,7 @@ class SourceMixin:
         for film_id, url in sorted(discovered_urls.items(), reverse=True):
             cached = self.read_cached_movie(film_id)
             if cached and not self.should_recheck_movie(film_id):
+                cached_fresh_hits += 1
                 self.ensure_canonical_id(cached)
                 if self.apply_imdb_metadata(cached, allow_network=False):
                     imdb_rehydrated_cache_count += 1
@@ -386,6 +390,7 @@ class SourceMixin:
 
             html = self.fetch_url(url)
             if not html:
+                fetch_failures += 1
                 if cached:
                     movies[film_id] = cached
                 continue
@@ -400,6 +405,7 @@ class SourceMixin:
             try:
                 parsed = self.parse_movie(film_id, url, html)
             except Exception as exc:
+                parse_failures += 1
                 log(
                     f"[{self.elapsed()}] Movie parse failed: film_id={film_id}, "
                     f"error={type(exc).__name__}: {exc}"
@@ -423,6 +429,12 @@ class SourceMixin:
             f"candidates={stale_or_new}, capped_skips={skipped_due_to_cap}, "
             f"country_backfill={backfilled_country_count}, "
             f"imdb_rehydrated_cache={imdb_rehydrated_cache_count}"
+        )
+        log(
+            f"[{self.elapsed()}] Movie phase diagnostics: "
+            f"fresh_cache_hits={cached_fresh_hits}, "
+            f"fetch_failures={fetch_failures}, parse_failures={parse_failures}, "
+            f"cache_size_loaded={len(movies)}"
         )
 
         return list(movies.values())
