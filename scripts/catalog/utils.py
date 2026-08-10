@@ -130,6 +130,9 @@ def is_guide_rapide_url(url: str) -> bool:
 def normalize_provider_image_url(url: str) -> str:
     """Return an image URL only when it is not hosted by the source site."""
     normalized = normalize_image_url(url)
+    lowered = normalized.lower()
+    if lowered in {"n/a", "na", "none", "null"}:
+        return ""
     if is_guide_rapide_url(normalized):
         return ""
     return normalized

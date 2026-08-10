@@ -94,10 +94,10 @@ class MetadataMixin:
             return False
         return bool(self.omdb_api_keys)
 
-    def should_use_tmdb(self) -> bool:
+    def should_use_tmdb(self, allow_when_omdb: bool = False) -> bool:
         if self.metadata_provider == "imdb":
             return False
-        if self.metadata_provider == "omdb":
+        if self.metadata_provider == "omdb" and not allow_when_omdb:
             return False
         return bool(self.config.tmdb_api_key)
 
@@ -106,8 +106,9 @@ class MetadataMixin:
         path: str,
         params: Optional[dict[str, str]] = None,
         include_default_language: bool = True,
+        allow_when_omdb: bool = False,
     ) -> Optional[dict]:
-        if not self.should_use_tmdb():
+        if not self.should_use_tmdb(allow_when_omdb=allow_when_omdb):
             return None
 
         query = {"api_key": self.config.tmdb_api_key}
@@ -500,13 +501,18 @@ class MetadataMixin:
         self.imdb_cache[imdb_id] = asdict(meta)
         return meta
 
-    def fetch_tmdb_metadata_by_imdb_id(self, imdb_id: str) -> ImdbMetadata:
-        if not self.should_use_tmdb() or not re.fullmatch(r"tt\d+", imdb_id):
+    def fetch_tmdb_metadata_by_imdb_id(
+        self,
+        imdb_id: str,
+        allow_when_omdb: bool = False,
+    ) -> ImdbMetadata:
+        if not self.should_use_tmdb(allow_when_omdb=allow_when_omdb) or not re.fullmatch(r"tt\d+", imdb_id):
             return ImdbMetadata()
 
         find_payload = self.fetch_tmdb_json(
             f"/find/{imdb_id}",
             params={"external_source": "imdb_id"},
+            allow_when_omdb=allow_when_omdb,
         )
         if not find_payload:
             return ImdbMetadata()
@@ -526,6 +532,7 @@ class MetadataMixin:
         details = self.fetch_tmdb_json(
             f"/movie/{movie_id}",
             params={"append_to_response": "credits,videos"},
+            allow_when_omdb=allow_when_omdb,
         )
         if not isinstance(details, dict):
             return ImdbMetadata()
@@ -648,7 +655,24 @@ class MetadataMixin:
                 return cached_meta
 
             omdb_meta = self.fetch_omdb_metadata_by_imdb_id(imdb_id)
-            merged_omdb = self.merge_metadata(omdb_meta, cached_meta or ImdbMetadata())
+            normalized_omdb_poster = normalize_provider_image_url(omdb_meta.poster)
+            omdb_meta_clean = omdb_meta
+            if omdb_meta.poster != normalized_omdb_poster:
+                cleaned_payload = asdict(omdb_meta)
+                cleaned_payload["poster"] = normalized_omdb_poster
+                omdb_meta_clean = ImdbMetadata(**cleaned_payload)
+
+            merged_omdb = omdb_meta_clean
+            if not normalized_omdb_poster:
+                # OMDb can return missing poster values for some titles.
+                # Use TMDb only as a targeted poster fallback in strict mode.
+                tmdb_meta = self.fetch_tmdb_metadata_by_imdb_id(
+                    imdb_id,
+                    allow_when_omdb=True,
+                )
+                merged_omdb = self.merge_metadata(omdb_meta_clean, tmdb_meta)
+
+            merged_omdb = self.merge_metadata(merged_omdb, cached_meta or ImdbMetadata())
             if merged_omdb.title or merged_omdb.poster or merged_omdb.description:
                 self.imdb_cache[imdb_id] = asdict(merged_omdb)
                 return merged_omdb

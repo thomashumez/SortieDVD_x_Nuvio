@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from scripts import build_catalog
 from scripts.catalog import output as catalog_output
 from scripts.catalog.models import ImdbMetadata, Movie
+from scripts.catalog.utils import normalize_provider_image_url
 
 
 class BuildCatalogTests(unittest.TestCase):
@@ -118,6 +119,11 @@ class BuildCatalogTests(unittest.TestCase):
             self.assertEqual(full_meta["logo"], "")
         finally:
             builder.close()
+
+    def test_provider_image_normalization_treats_na_as_missing(self) -> None:
+        self.assertEqual(normalize_provider_image_url("N/A"), "")
+        self.assertEqual(normalize_provider_image_url("na"), "")
+        self.assertEqual(normalize_provider_image_url("None"), "")
 
     def test_omdb_metadata_sets_provider_and_poster(self) -> None:
         builder = build_catalog.GuideRapideBuilder()
@@ -282,6 +288,47 @@ class BuildCatalogTests(unittest.TestCase):
             self.assertEqual(metadata.poster, "https://m.media-amazon.com/images/repaired.jpg")
             fetch_omdb.assert_called_once_with("tt1234567")
             fetch_tmdb.assert_not_called()
+        finally:
+            builder.close()
+
+    def test_strict_omdb_mode_uses_tmdb_when_omdb_poster_is_na(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            metadata_provider="omdb",
+            require_omdb_metadata=True,
+            omdb_api_key="dummy-key",
+            tmdb_api_key="dummy-tmdb",
+            omdb_api_keys_raw="",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            omdb_meta = ImdbMetadata(
+                title="Title from OMDb",
+                poster="N/A",
+                provider="omdb",
+            )
+            tmdb_meta = ImdbMetadata(
+                title="Title from TMDb",
+                poster="https://image.tmdb.org/t/p/w780/poster.jpg",
+                provider="tmdb",
+            )
+
+            with patch.object(
+                builder,
+                "fetch_omdb_metadata_by_imdb_id",
+                return_value=omdb_meta,
+            ) as fetch_omdb:
+                with patch.object(
+                    builder,
+                    "fetch_tmdb_metadata_by_imdb_id",
+                    return_value=tmdb_meta,
+                ) as fetch_tmdb:
+                    metadata = builder.fetch_imdb_metadata("tt1234567", allow_backfill=True)
+
+            self.assertEqual(metadata.provider, "omdb")
+            self.assertEqual(metadata.poster, "https://image.tmdb.org/t/p/w780/poster.jpg")
+            fetch_omdb.assert_called_once_with("tt1234567")
+            fetch_tmdb.assert_called_once_with("tt1234567", allow_when_omdb=True)
         finally:
             builder.close()
 
