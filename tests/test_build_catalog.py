@@ -568,6 +568,53 @@ class BuildCatalogTests(unittest.TestCase):
         finally:
             builder.close()
 
+    def test_tmdb_release_refresh_incremental_checks_only_upcoming_or_missing_dates(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            tmdb_api_key="dummy-tmdb",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            today = datetime.now(timezone.utc).date()
+
+            past_movie = self.make_movie()
+            past_date = (today - timedelta(days=30)).isoformat()
+            past_movie.physical_release_date = past_date
+            past_movie.released = past_date
+
+            upcoming_movie = self.make_movie()
+            future_date = (today + timedelta(days=30)).isoformat()
+            upcoming_movie.physical_release_date = future_date
+            upcoming_movie.released = future_date
+
+            missing_date_movie = self.make_movie()
+            missing_date_movie.physical_release_date = ""
+            missing_date_movie.released = ""
+
+            release_payload = {
+                "results": [
+                    {
+                        "iso_3166_1": "US",
+                        "release_dates": [
+                            {"type": 4, "release_date": "2026-08-10T00:00:00.000Z"},
+                        ],
+                    }
+                ]
+            }
+
+            with patch.object(builder, "resolve_tmdb_id_for_movie", return_value=999) as resolve_tmdb_id:
+                with patch.object(builder, "fetch_tmdb_json", return_value=release_payload):
+                    checked, updated = builder.refresh_tmdb_release_dates_for_library(
+                        [past_movie, upcoming_movie, missing_date_movie],
+                        full_scan=False,
+                    )
+
+            self.assertEqual(resolve_tmdb_id.call_count, 2)
+            self.assertEqual(checked, 2)
+            self.assertEqual(updated, 2)
+        finally:
+            builder.close()
+
     def test_meta_includes_cinema_and_physical_release_fields(self) -> None:
         builder = build_catalog.GuideRapideBuilder()
         try:

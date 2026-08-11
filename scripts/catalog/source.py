@@ -572,15 +572,31 @@ class SourceMixin:
             return None
         return tmdb_id
 
-    def refresh_tmdb_release_dates_for_library(self, movies: list[Movie]) -> tuple[int, int]:
+    def refresh_tmdb_release_dates_for_library(self, movies: list[Movie], full_scan: bool = True) -> tuple[int, int]:
         if not self.should_use_tmdb(allow_when_omdb=True):
             return 0, 0
+
+        today = datetime.now(timezone.utc).date()
+        next_12_months_cutoff = add_months(today, 12).isoformat()
+        today_iso = today.isoformat()
 
         checked = 0
         updated = 0
         candidates = 0
+        eligible = 0
+
+        mode_label = "full" if full_scan else "incremental"
 
         for movie in movies:
+            if not full_scan:
+                # Incremental runs refresh TMDB only for "prochaines sorties"
+                # and entries that still have no release date.
+                release_day = movie.physical_release_date or movie.released
+                if release_day:
+                    if not (today_iso < release_day <= next_12_months_cutoff):
+                        continue
+
+            eligible += 1
             tmdb_id = self.resolve_tmdb_id_for_movie(movie)
             if tmdb_id is None:
                 continue
@@ -644,7 +660,8 @@ class SourceMixin:
                     self.write_cached_movie(movie)
 
         log(
-            f"[{self.elapsed()}] TMDB release-date refresh: checked={checked}, updated={updated}"
+            f"[{self.elapsed()}] TMDB release-date refresh: mode={mode_label}, "
+            f"eligible={eligible}, checked={checked}, updated={updated}"
         )
         return checked, updated
 
