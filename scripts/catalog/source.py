@@ -471,10 +471,10 @@ class SourceMixin:
         payload: dict,
         date_from_iso: str,
         date_to_iso: str,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str, str]:
         movie_results = payload.get("results")
         if not isinstance(movie_results, list):
-            return "", ""
+            return "", "", "", ""
 
         france_entry = next(
             (
@@ -485,9 +485,11 @@ class SourceMixin:
             None,
         )
         if not isinstance(france_entry, dict):
-            return "", ""
+            return "", "", "", ""
 
         physical_dates: list[str] = []
+        digital_dates: list[str] = []
+        tv_dates: list[str] = []
         cinema_dates: list[str] = []
         for release in france_entry.get("release_dates", []):
             if not isinstance(release, dict):
@@ -499,12 +501,18 @@ class SourceMixin:
             release_type = release.get("type")
             if release_type == 5 and date_from_iso <= day <= date_to_iso:
                 physical_dates.append(day)
+            if release_type == 4 and date_from_iso <= day <= date_to_iso:
+                digital_dates.append(day)
+            if release_type == 6 and date_from_iso <= day <= date_to_iso:
+                tv_dates.append(day)
             if release_type in {2, 3}:
                 cinema_dates.append(day)
 
         physical = min(physical_dates) if physical_dates else ""
+        digital = min(digital_dates) if digital_dates else ""
+        tv = min(tv_dates) if tv_dates else ""
         cinema = min(cinema_dates) if cinema_dates else ""
-        return physical, cinema
+        return physical, digital, tv, cinema
 
     def discover_tmdb_physical_movies(self) -> list[Movie]:
         if not self.config.enable_tmdb_physical_discovery:
@@ -520,7 +528,7 @@ class SourceMixin:
 
         params = {
             "region": "FR",
-            "with_release_type": "5",
+            "with_release_type": "4|5|6",
             "with_origin_country": "FR",
             "release_date.gte": date_from_iso,
             "release_date.lte": date_to_iso,
@@ -570,12 +578,25 @@ class SourceMixin:
                 if not isinstance(release_payload, dict):
                     continue
 
-                physical_date, cinema_date = self.parse_tmdb_release_dates(
+                physical_date, digital_date, tv_date, cinema_date = self.parse_tmdb_release_dates(
                     release_payload,
                     date_from_iso,
                     date_to_iso,
                 )
-                if not physical_date:
+
+                selected_release_type = ""
+                selected_release_date = ""
+                if physical_date:
+                    selected_release_type = "physical"
+                    selected_release_date = physical_date
+                elif digital_date:
+                    selected_release_type = "digital"
+                    selected_release_date = digital_date
+                elif tv_date:
+                    selected_release_type = "tv"
+                    selected_release_date = tv_date
+
+                if not selected_release_date:
                     continue
 
                 external_ids_payload = self.fetch_tmdb_json(
@@ -605,6 +626,15 @@ class SourceMixin:
                 if not cinema_date and len(release_date) >= 10:
                     cinema_date = release_date[:10]
 
+                tmdb_release_chunks: list[str] = []
+                if physical_date:
+                    tmdb_release_chunks.append(f"Physical: {physical_date}")
+                if digital_date:
+                    tmdb_release_chunks.append(f"Digital: {digital_date}")
+                if tv_date:
+                    tmdb_release_chunks.append(f"TV: {tv_date}")
+                tmdb_release_text = " | ".join(tmdb_release_chunks) if tmdb_release_chunks else selected_release_date
+
                 movie = Movie(
                     id=self.canonical_movie_id(
                         self.tmdb_synthetic_movie_id(tmdb_id),
@@ -632,15 +662,15 @@ class SourceMixin:
                     metascore="",
                     imdb_id=imdb_id,
                     production_countries=["France"],
-                    dvd_release_date=physical_date,
-                    bluray_release_date=physical_date,
-                    release_type="physical",
-                    release_text=f"Physical (TMDB FR): {physical_date}",
-                    released=physical_date,
+                    dvd_release_date=selected_release_date,
+                    bluray_release_date=selected_release_date,
+                    release_type=selected_release_type,
+                    release_text=f"TMDB FR releases: {tmdb_release_text}",
+                    released=selected_release_date,
                     physical_available=True,
                     checked_at=datetime.now(timezone.utc).isoformat(),
                     tmdb_id=tmdb_id,
-                    physical_release_date=physical_date,
+                    physical_release_date=selected_release_date,
                     cinema_release_date=cinema_date,
                 )
 
@@ -654,7 +684,7 @@ class SourceMixin:
             page += 1
 
         log(
-            f"[{self.elapsed()}] TMDB physical discovery: {len(discovered)} movies "
+            f"[{self.elapsed()}] TMDB discovery (physical/digital/tv): {len(discovered)} movies "
             f"between {date_from_iso} and {date_to_iso}"
         )
         return discovered
