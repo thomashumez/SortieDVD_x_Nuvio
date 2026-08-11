@@ -26,8 +26,10 @@ from .config import (
 )
 from .models import Movie
 from .utils import (
+    add_months,
     atomic_write_text,
     log,
+    normalize_text,
     parse_iso_date,
     parse_timestamp,
     read_json,
@@ -37,6 +39,8 @@ from .utils import (
 )
 
 class SourceMixin:
+
+    TMDB_SYNTHETIC_ID_OFFSET = 900_000_000
 
     def cache_key(self, url: str) -> str:
         return hashlib.sha1(url.encode("utf-8")).hexdigest()
@@ -279,6 +283,15 @@ class SourceMixin:
         payload.setdefault("box_office", "")
         payload.setdefault("awards", "")
         payload.setdefault("metascore", "")
+        payload.setdefault("tmdb_id", None)
+        payload.setdefault("physical_release_date", "")
+        payload.setdefault("cinema_release_date", "")
+        if not payload.get("physical_release_date"):
+            payload["physical_release_date"] = (
+                str(payload.get("released") or "")
+                or str(payload.get("dvd_release_date") or "")
+                or str(payload.get("bluray_release_date") or "")
+            )
         payload["poster"] = normalize_provider_image_url(str(payload.get("poster") or ""))
 
         try:
@@ -296,6 +309,8 @@ class SourceMixin:
         write_json(IMDB_CACHE_DIR / "index.json", self.imdb_cache)
 
     def needs_country_backfill(self, movie: Movie) -> bool:
+        if not self.is_internal(movie.source_url):
+            return False
         if movie.production_countries:
             return False
         if not movie.dvd_release_date:
@@ -354,6 +369,15 @@ class SourceMixin:
             payload.setdefault("box_office", "")
             payload.setdefault("awards", "")
             payload.setdefault("metascore", "")
+            payload.setdefault("tmdb_id", None)
+            payload.setdefault("physical_release_date", "")
+            payload.setdefault("cinema_release_date", "")
+            if not payload.get("physical_release_date"):
+                payload["physical_release_date"] = (
+                    str(payload.get("released") or "")
+                    or str(payload.get("dvd_release_date") or "")
+                    or str(payload.get("bluray_release_date") or "")
+                )
             payload["poster"] = normalize_provider_image_url(str(payload.get("poster") or ""))
             try:
                 cached = Movie(**payload)
@@ -438,3 +462,264 @@ class SourceMixin:
         )
 
         return list(movies.values())
+
+    def tmdb_synthetic_movie_id(self, tmdb_id: int) -> int:
+        return self.TMDB_SYNTHETIC_ID_OFFSET + tmdb_id
+
+    def parse_tmdb_release_dates(
+        self,
+        payload: dict,
+        date_from_iso: str,
+        date_to_iso: str,
+    ) -> tuple[str, str]:
+        movie_results = payload.get("results")
+        if not isinstance(movie_results, list):
+            return "", ""
+
+        france_entry = next(
+            (
+                country
+                for country in movie_results
+                if isinstance(country, dict) and country.get("iso_3166_1") == "FR"
+            ),
+            None,
+        )
+        if not isinstance(france_entry, dict):
+            return "", ""
+
+        physical_dates: list[str] = []
+        cinema_dates: list[str] = []
+        for release in france_entry.get("release_dates", []):
+            if not isinstance(release, dict):
+                continue
+            release_raw = normalize_text(str(release.get("release_date") or ""))
+            if len(release_raw) < 10:
+                continue
+            day = release_raw[:10]
+            release_type = release.get("type")
+            if release_type == 5 and date_from_iso <= day <= date_to_iso:
+                physical_dates.append(day)
+            if release_type in {2, 3}:
+                cinema_dates.append(day)
+
+        physical = min(physical_dates) if physical_dates else ""
+        cinema = min(cinema_dates) if cinema_dates else ""
+        return physical, cinema
+
+    def discover_tmdb_physical_movies(self) -> list[Movie]:
+        if not self.config.enable_tmdb_physical_discovery:
+            return []
+        if not self.should_use_tmdb(allow_when_omdb=True):
+            return []
+
+        today = datetime.now(timezone.utc).date()
+        date_from = subtract_months(today, self.config.tmdb_discovery_past_months)
+        date_to = add_months(today, self.config.tmdb_discovery_future_months)
+        date_from_iso = date_from.isoformat()
+        date_to_iso = date_to.isoformat()
+
+        params = {
+            "region": "FR",
+            "with_release_type": "5",
+            "with_origin_country": "FR",
+            "release_date.gte": date_from_iso,
+            "release_date.lte": date_to_iso,
+            "sort_by": "release_date.asc",
+            "include_adult": "false",
+            "page": "1",
+        }
+
+        discovered: list[Movie] = []
+        page = 1
+        total_pages = 1
+
+        while page <= total_pages and page <= self.config.tmdb_discovery_max_pages:
+            params["page"] = str(page)
+            payload = self.fetch_tmdb_json(
+                "/discover/movie",
+                params=params,
+                include_default_language=True,
+                allow_when_omdb=True,
+            )
+            if not isinstance(payload, dict):
+                break
+
+            total_pages_raw = payload.get("total_pages")
+            if isinstance(total_pages_raw, int) and total_pages_raw > 0:
+                total_pages = total_pages_raw
+
+            results = payload.get("results")
+            if not isinstance(results, list):
+                break
+
+            for item in results:
+                if len(discovered) >= self.config.tmdb_discovery_max_movies_per_run:
+                    break
+                if not isinstance(item, dict):
+                    continue
+
+                tmdb_id = item.get("id")
+                if not isinstance(tmdb_id, int):
+                    continue
+
+                release_payload = self.fetch_tmdb_json(
+                    f"/movie/{tmdb_id}/release_dates",
+                    include_default_language=False,
+                    allow_when_omdb=True,
+                )
+                if not isinstance(release_payload, dict):
+                    continue
+
+                physical_date, cinema_date = self.parse_tmdb_release_dates(
+                    release_payload,
+                    date_from_iso,
+                    date_to_iso,
+                )
+                if not physical_date:
+                    continue
+
+                external_ids_payload = self.fetch_tmdb_json(
+                    f"/movie/{tmdb_id}/external_ids",
+                    include_default_language=False,
+                    allow_when_omdb=True,
+                )
+
+                imdb_id = ""
+                if isinstance(external_ids_payload, dict):
+                    maybe_imdb_id = normalize_text(str(external_ids_payload.get("imdb_id") or ""))
+                    if re.fullmatch(r"tt\d+", maybe_imdb_id):
+                        imdb_id = maybe_imdb_id
+
+                title = normalize_text(str(item.get("title") or item.get("name") or ""))
+                if not title:
+                    continue
+
+                release_date = normalize_text(str(item.get("release_date") or ""))
+                year = None
+                year_match = re.match(r"(\d{4})", release_date)
+                if year_match:
+                    year = int(year_match.group(1))
+
+                poster = self.tmdb_poster_url(str(item.get("poster_path") or ""))
+                synopsis = normalize_text(str(item.get("overview") or ""))
+                if not cinema_date and len(release_date) >= 10:
+                    cinema_date = release_date[:10]
+
+                movie = Movie(
+                    id=self.canonical_movie_id(
+                        self.tmdb_synthetic_movie_id(tmdb_id),
+                        imdb_id=imdb_id,
+                    ),
+                    source_url=f"https://www.themoviedb.org/movie/{tmdb_id}",
+                    guide_rapide_id=self.tmdb_synthetic_movie_id(tmdb_id),
+                    title=title,
+                    year=year,
+                    director=[],
+                    actors=[],
+                    runtime="",
+                    genres=[],
+                    synopsis=synopsis,
+                    rating="",
+                    voters=None,
+                    poster=poster,
+                    trailer_url="",
+                    writers=[],
+                    production_companies=[],
+                    critic_ratings={},
+                    content_rating="",
+                    box_office="",
+                    awards="",
+                    metascore="",
+                    imdb_id=imdb_id,
+                    production_countries=["France"],
+                    dvd_release_date=physical_date,
+                    bluray_release_date=physical_date,
+                    release_type="physical",
+                    release_text=f"Physical (TMDB FR): {physical_date}",
+                    released=physical_date,
+                    physical_available=True,
+                    checked_at=datetime.now(timezone.utc).isoformat(),
+                    tmdb_id=tmdb_id,
+                    physical_release_date=physical_date,
+                    cinema_release_date=cinema_date,
+                )
+
+                if movie.imdb_id:
+                    self.apply_imdb_metadata(movie)
+
+                discovered.append(movie)
+
+            if len(discovered) >= self.config.tmdb_discovery_max_movies_per_run:
+                break
+            page += 1
+
+        log(
+            f"[{self.elapsed()}] TMDB physical discovery: {len(discovered)} movies "
+            f"between {date_from_iso} and {date_to_iso}"
+        )
+        return discovered
+
+    def merge_tmdb_movie_data(self, base_movie: Movie, tmdb_movie: Movie) -> bool:
+        changed = False
+
+        if tmdb_movie.physical_release_date and base_movie.physical_release_date != tmdb_movie.physical_release_date:
+            base_movie.physical_release_date = tmdb_movie.physical_release_date
+            base_movie.released = tmdb_movie.physical_release_date
+            changed = True
+
+        if tmdb_movie.cinema_release_date and base_movie.cinema_release_date != tmdb_movie.cinema_release_date:
+            base_movie.cinema_release_date = tmdb_movie.cinema_release_date
+            changed = True
+
+        if tmdb_movie.tmdb_id is not None and base_movie.tmdb_id != tmdb_movie.tmdb_id:
+            base_movie.tmdb_id = tmdb_movie.tmdb_id
+            changed = True
+
+        if tmdb_movie.imdb_id and not base_movie.imdb_id:
+            base_movie.imdb_id = tmdb_movie.imdb_id
+            self.ensure_canonical_id(base_movie)
+            changed = True
+
+        if tmdb_movie.release_text and "TMDB" not in base_movie.release_text:
+            if base_movie.release_text:
+                base_movie.release_text = f"{base_movie.release_text} | {tmdb_movie.release_text}"
+            else:
+                base_movie.release_text = tmdb_movie.release_text
+            changed = True
+
+        if changed:
+            base_movie.checked_at = datetime.now(timezone.utc).isoformat()
+        return changed
+
+    def merge_with_tmdb_movies(self, guide_movies: list[Movie], tmdb_movies: list[Movie]) -> list[Movie]:
+        merged: list[Movie] = list(guide_movies)
+        by_imdb_id: dict[str, Movie] = {
+            movie.imdb_id: movie
+            for movie in merged
+            if movie.imdb_id
+        }
+
+        merged_count = 0
+        appended_count = 0
+
+        for tmdb_movie in tmdb_movies:
+            target = None
+            if tmdb_movie.imdb_id:
+                target = by_imdb_id.get(tmdb_movie.imdb_id)
+
+            if target:
+                if self.merge_tmdb_movie_data(target, tmdb_movie):
+                    merged_count += 1
+                    if target.guide_rapide_id < self.TMDB_SYNTHETIC_ID_OFFSET:
+                        self.write_cached_movie(target)
+                continue
+
+            merged.append(tmdb_movie)
+            if tmdb_movie.imdb_id:
+                by_imdb_id[tmdb_movie.imdb_id] = tmdb_movie
+            appended_count += 1
+
+        log(
+            f"[{self.elapsed()}] TMDB merge summary: merged={merged_count}, appended={appended_count}"
+        )
+        return merged

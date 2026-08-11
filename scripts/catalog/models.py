@@ -36,6 +36,9 @@ class Movie:
     released: str
     physical_available: bool
     checked_at: str
+    tmdb_id: Optional[int] = None
+    physical_release_date: str = ""
+    cinema_release_date: str = ""
     metadata_source: str = ""
 
 

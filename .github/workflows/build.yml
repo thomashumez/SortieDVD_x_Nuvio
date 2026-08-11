@@ -160,6 +160,9 @@ jobs:
           GR_OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
           GR_OMDB_API_KEYS: ${{ secrets.OMDB_API_KEYS }}
           GR_TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          GR_TMDB_ACCESS_TOKEN: ${{ secrets.GR_TMDB_ACCESS_TOKEN }}
+          GR_TMDB_DISCOVERY_PAST_MONTHS: "12"
+          GR_TMDB_DISCOVERY_FUTURE_MONTHS: "12"
           GR_ENABLE_IMDB_SUGGESTION_FALLBACK: "false"
           GR_ENABLE_IMDB_HTML_FALLBACK: "false"
           GR_GUIDE_RAPIDE_DELAY_SECONDS: "0.5"

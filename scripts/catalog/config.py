@@ -142,8 +142,14 @@ class BuildConfig:
     omdb_api_key: str
     omdb_api_keys_raw: str
     tmdb_api_key: str
+    tmdb_access_token: str
     enable_imdb_suggestion_fallback: bool
     enable_imdb_html_fallback: bool
+    enable_tmdb_physical_discovery: bool
+    tmdb_discovery_past_months: int
+    tmdb_discovery_future_months: int
+    tmdb_discovery_max_pages: int
+    tmdb_discovery_max_movies_per_run: int
 
     @classmethod
     def from_env(cls) -> "BuildConfig":
@@ -176,8 +182,16 @@ class BuildConfig:
             omdb_api_key=os.getenv("GR_OMDB_API_KEY", "").strip(),
             omdb_api_keys_raw=os.getenv("GR_OMDB_API_KEYS", "").strip(),
             tmdb_api_key=os.getenv("GR_TMDB_API_KEY", "").strip(),
+            tmdb_access_token=os.getenv("GR_TMDB_ACCESS_TOKEN", "").strip(),
             enable_imdb_suggestion_fallback=env_bool(
                 "GR_ENABLE_IMDB_SUGGESTION_FALLBACK", True
             ),
             enable_imdb_html_fallback=env_bool("GR_ENABLE_IMDB_HTML_FALLBACK", False),
+            enable_tmdb_physical_discovery=env_bool("GR_ENABLE_TMDB_PHYSICAL_DISCOVERY", True),
+            tmdb_discovery_past_months=env_int("GR_TMDB_DISCOVERY_PAST_MONTHS", 12),
+            tmdb_discovery_future_months=env_int("GR_TMDB_DISCOVERY_FUTURE_MONTHS", 12),
+            tmdb_discovery_max_pages=env_int("GR_TMDB_DISCOVERY_MAX_PAGES", 10, minimum=1),
+            tmdb_discovery_max_movies_per_run=env_int(
+                "GR_TMDB_DISCOVERY_MAX_MOVIES_PER_RUN", 120, minimum=1
+            ),
         )

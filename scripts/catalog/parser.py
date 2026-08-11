@@ -312,6 +312,8 @@ class ParserMixin:
             released=dt_to_iso(released_dt),
             physical_available=physical_available,
             checked_at=datetime.now(timezone.utc).isoformat(),
+            physical_release_date=dt_to_iso(released_dt),
+            cinema_release_date="",
         )
 
         # Only exported physical movies need provider enrichment. This keeps

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import OUTPUT_DIR, STATE_FILE
 from .models import Movie
 from .utils import (
+    add_months,
     atomic_write_text,
     log,
     normalize_provider_image_url,
@@ -40,6 +41,8 @@ class OutputMixin:
         return ""
 
     def release_info_text(self, movie: Movie) -> str:
+        if movie.physical_release_date:
+            return movie.physical_release_date
         if movie.dvd_release_date:
             return movie.dvd_release_date
         if movie.bluray_release_date:
@@ -94,6 +97,10 @@ class OutputMixin:
 
         if movie.released:
             meta["released"] = movie.released
+        if movie.physical_release_date:
+            meta["physicalRelease"] = movie.physical_release_date
+        if movie.cinema_release_date:
+            meta["cinemaRelease"] = movie.cinema_release_date
         if movie.rating:
             meta["imdbRating"] = movie.rating
         if movie.runtime:
@@ -147,13 +154,25 @@ class OutputMixin:
     def build_catalogs(self, movies: list[Movie]) -> tuple[list[dict], dict[str, list[Movie]]]:
         today = datetime.now(timezone.utc).date().isoformat()
         last_12_months_cutoff = subtract_months(datetime.now(timezone.utc).date(), 12).isoformat()
+        next_12_months_cutoff = add_months(datetime.now(timezone.utc).date(), 12).isoformat()
 
         physical_movies = [m for m in movies if m.physical_available]
-        physical_past = [m for m in physical_movies if m.released and m.released <= today]
-        physical_future = [m for m in physical_movies if m.released and m.released > today]
+        physical_past = [
+            m
+            for m in physical_movies
+            if (m.physical_release_date or m.released)
+            and (m.physical_release_date or m.released) <= today
+        ]
+        physical_future = [
+            m
+            for m in physical_movies
+            if (m.physical_release_date or m.released)
+            and (m.physical_release_date or m.released) > today
+            and (m.physical_release_date or m.released) <= next_12_months_cutoff
+        ]
 
-        physical_past.sort(key=lambda m: m.released, reverse=True)
-        physical_future.sort(key=lambda m: m.released)
+        physical_past.sort(key=lambda m: (m.physical_release_date or m.released), reverse=True)
+        physical_future.sort(key=lambda m: (m.physical_release_date or m.released))
 
         catalog_defs = [
             {
@@ -171,9 +190,9 @@ class OutputMixin:
         dvd_recent = [
             m
             for m in physical_past
-            if m.dvd_release_date and m.dvd_release_date >= last_12_months_cutoff
+            if m.physical_release_date and m.physical_release_date >= last_12_months_cutoff
         ]
-        dvd_recent.sort(key=lambda m: m.dvd_release_date, reverse=True)
+        dvd_recent.sort(key=lambda m: m.physical_release_date, reverse=True)
 
         dvd_recent_fr = [m for m in dvd_recent if self.is_french_production(m)]
         dvd_recent_international = [m for m in dvd_recent if not self.is_french_production(m)]

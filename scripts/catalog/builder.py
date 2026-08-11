@@ -101,6 +101,8 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
             discovered_urls,
             max_movie_fetch_per_run=int(run_profile["max_movie_fetch_per_run"]),
         )
+        tmdb_movies = self.discover_tmdb_physical_movies()
+        movies = self.merge_with_tmdb_movies(movies, tmdb_movies)
         if not discovered_urls and not movies:
             raise RuntimeError(
                 "Discovery returned no movie links and no cached movies are available; "
@@ -108,7 +110,10 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
             )
 
         physical_movies = [m for m in movies if m.physical_available]
-        physical_movies.sort(key=lambda m: (m.released, m.guide_rapide_id), reverse=True)
+        physical_movies.sort(
+            key=lambda m: (m.physical_release_date or m.released, m.guide_rapide_id),
+            reverse=True,
+        )
 
         # Keep one entry per canonical ID so stream providers are queried consistently.
         deduped_by_id: dict[str, Movie] = {}

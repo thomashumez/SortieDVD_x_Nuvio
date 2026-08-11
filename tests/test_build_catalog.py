@@ -496,6 +496,44 @@ class BuildCatalogTests(unittest.TestCase):
             self.assertEqual((target / "new.txt").read_text(encoding="utf-8"), "new")
             self.assertFalse((target / "old.txt").exists())
 
+    def test_tmdb_merge_overrides_physical_release_and_keeps_cinema_date(self) -> None:
+        builder = build_catalog.GuideRapideBuilder()
+        try:
+            base = self.make_movie()
+            base.physical_release_date = "2026-08-01"
+            base.cinema_release_date = ""
+
+            tmdb = self.make_movie()
+            tmdb.tmdb_id = 123
+            tmdb.physical_release_date = "2026-08-12"
+            tmdb.cinema_release_date = "2026-05-04"
+            tmdb.release_text = "Physical (TMDB FR): 2026-08-12"
+
+            changed = builder.merge_tmdb_movie_data(base, tmdb)
+
+            self.assertTrue(changed)
+            self.assertEqual(base.physical_release_date, "2026-08-12")
+            self.assertEqual(base.released, "2026-08-12")
+            self.assertEqual(base.cinema_release_date, "2026-05-04")
+            self.assertEqual(base.tmdb_id, 123)
+            self.assertIn("TMDB", base.release_text)
+        finally:
+            builder.close()
+
+    def test_meta_includes_cinema_and_physical_release_fields(self) -> None:
+        builder = build_catalog.GuideRapideBuilder()
+        try:
+            movie = self.make_movie()
+            movie.physical_release_date = "2026-08-15"
+            movie.cinema_release_date = "2026-03-10"
+
+            meta = builder.to_meta(movie)
+            self.assertEqual(meta.get("physicalRelease"), "2026-08-15")
+            self.assertEqual(meta.get("cinemaRelease"), "2026-03-10")
+            self.assertEqual(meta.get("releaseInfo"), "2026-08-15")
+        finally:
+            builder.close()
+
 
 if __name__ == "__main__":
     unittest.main()

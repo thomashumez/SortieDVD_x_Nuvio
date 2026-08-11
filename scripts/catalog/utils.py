@@ -144,5 +144,12 @@ def subtract_months(src: date, months: int) -> date:
     day = min(src.day, calendar.monthrange(year, month)[1])
     return date(year, month, day)
 
+def add_months(src: date, months: int) -> date:
+    month_index = src.month - 1 + months
+    year = src.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    day = min(src.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
 def log(message: str) -> None:
     print(message, flush=True)

@@ -54,7 +54,12 @@ class HttpMixin:
             self.log_request_failure(url, exc)
             return None
 
-    def fetch_json(self, url: str, params: Optional[dict[str, str]] = None) -> Optional[dict]:
+    def fetch_json(
+        self,
+        url: str,
+        params: Optional[dict[str, str]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> Optional[dict]:
         self.last_http_status = None
         bucket, delay_seconds, timeout_seconds = self.request_profile(url)
         if not self.reserve_request_budget(bucket):
@@ -62,7 +67,12 @@ class HttpMixin:
         self.throttle(bucket, delay_seconds)
         self.last_request_ts_by_bucket[bucket] = time.time()
         try:
-            response = self.session.get(url, params=params, timeout=timeout_seconds)
+            response = self.session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=timeout_seconds,
+            )
             self.last_http_status = response.status_code
             response.raise_for_status()
             payload = response.json()

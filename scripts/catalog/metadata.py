@@ -141,7 +141,7 @@ class MetadataMixin:
             return False
         if self.metadata_provider == "omdb" and not allow_when_omdb:
             return False
-        return bool(self.config.tmdb_api_key)
+        return bool(self.config.tmdb_api_key or self.config.tmdb_access_token)
 
     def fetch_tmdb_json(
         self,
@@ -153,12 +153,23 @@ class MetadataMixin:
         if not self.should_use_tmdb(allow_when_omdb=allow_when_omdb):
             return None
 
-        query = {"api_key": self.config.tmdb_api_key}
+        query: dict[str, str] = {}
+        headers: dict[str, str] = {}
+        if self.config.tmdb_api_key:
+            query["api_key"] = self.config.tmdb_api_key
+        elif self.config.tmdb_access_token:
+            headers["Authorization"] = f"Bearer {self.config.tmdb_access_token}"
+            headers["accept"] = "application/json"
+
         if include_default_language:
             query["language"] = "fr-FR"
         if params:
             query.update(params)
-        return self.fetch_json(f"{TMDB_API_URL}{path}", params=query)
+        return self.fetch_json(
+            f"{TMDB_API_URL}{path}",
+            params=query,
+            headers=headers or None,
+        )
 
     def pick_tmdb_trailer_url(self, results: list[dict]) -> str:
         ranked: list[tuple[int, str]] = []
