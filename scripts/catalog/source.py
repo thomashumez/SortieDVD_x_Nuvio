@@ -469,50 +469,184 @@ class SourceMixin:
     def parse_tmdb_release_dates(
         self,
         payload: dict,
-        date_from_iso: str,
-        date_to_iso: str,
+        date_from_iso: Optional[str] = None,
+        date_to_iso: Optional[str] = None,
     ) -> tuple[str, str, str, str]:
         movie_results = payload.get("results")
         if not isinstance(movie_results, list):
-            return "", "", "", ""
-
-        france_entry = next(
-            (
-                country
-                for country in movie_results
-                if isinstance(country, dict) and country.get("iso_3166_1") == "FR"
-            ),
-            None,
-        )
-        if not isinstance(france_entry, dict):
             return "", "", "", ""
 
         physical_dates: list[str] = []
         digital_dates: list[str] = []
         tv_dates: list[str] = []
         cinema_dates: list[str] = []
-        for release in france_entry.get("release_dates", []):
-            if not isinstance(release, dict):
+        for country_entry in movie_results:
+            if not isinstance(country_entry, dict):
                 continue
-            release_raw = normalize_text(str(release.get("release_date") or ""))
-            if len(release_raw) < 10:
-                continue
-            day = release_raw[:10]
-            release_type = release.get("type")
-            if release_type == 5 and date_from_iso <= day <= date_to_iso:
-                physical_dates.append(day)
-            if release_type == 4 and date_from_iso <= day <= date_to_iso:
-                digital_dates.append(day)
-            if release_type == 6 and date_from_iso <= day <= date_to_iso:
-                tv_dates.append(day)
-            if release_type in {2, 3}:
-                cinema_dates.append(day)
+            for release in country_entry.get("release_dates", []):
+                if not isinstance(release, dict):
+                    continue
+                release_raw = normalize_text(str(release.get("release_date") or ""))
+                if len(release_raw) < 10:
+                    continue
+                day = release_raw[:10]
+                release_type = release.get("type")
+                in_window = True
+                if date_from_iso and day < date_from_iso:
+                    in_window = False
+                if date_to_iso and day > date_to_iso:
+                    in_window = False
+
+                if release_type == 5 and in_window:
+                    physical_dates.append(day)
+                if release_type == 4 and in_window:
+                    digital_dates.append(day)
+                if release_type == 6 and in_window:
+                    tv_dates.append(day)
+                if release_type in {2, 3}:
+                    cinema_dates.append(day)
 
         physical = min(physical_dates) if physical_dates else ""
         digital = min(digital_dates) if digital_dates else ""
         tv = min(tv_dates) if tv_dates else ""
         cinema = min(cinema_dates) if cinema_dates else ""
         return physical, digital, tv, cinema
+
+    def tmdb_primary_release(self, physical_date: str, digital_date: str, tv_date: str) -> tuple[str, str]:
+        if digital_date:
+            return "digital", digital_date
+        if physical_date:
+            return "physical", physical_date
+        if tv_date:
+            return "tv", tv_date
+        return "", ""
+
+    def tmdb_release_text(self, physical_date: str, digital_date: str, tv_date: str) -> str:
+        chunks: list[str] = []
+        if physical_date:
+            chunks.append(f"Physical: {physical_date}")
+        if digital_date:
+            chunks.append(f"Digital: {digital_date}")
+        if tv_date:
+            chunks.append(f"TV: {tv_date}")
+        if not chunks:
+            return ""
+        return f"TMDB releases: {' | '.join(chunks)}"
+
+    def merge_tmdb_release_text(self, base_text: str, tmdb_text: str) -> str:
+        if not tmdb_text:
+            return base_text
+        parts = [part.strip() for part in (base_text or "").split("|") if part.strip()]
+        kept = [
+            part
+            for part in parts
+            if "tmdb" not in part.lower()
+        ]
+        if kept:
+            return " | ".join([*kept, tmdb_text])
+        return tmdb_text
+
+    def resolve_tmdb_id_for_movie(self, movie: Movie) -> Optional[int]:
+        if movie.tmdb_id is not None:
+            return movie.tmdb_id
+        if not movie.imdb_id:
+            return None
+
+        find_payload = self.fetch_tmdb_json(
+            f"/find/{movie.imdb_id}",
+            params={"external_source": "imdb_id"},
+            include_default_language=False,
+            allow_when_omdb=True,
+        )
+        if not isinstance(find_payload, dict):
+            return None
+
+        movie_results = find_payload.get("movie_results")
+        if not isinstance(movie_results, list) or not movie_results:
+            return None
+        first = movie_results[0]
+        if not isinstance(first, dict):
+            return None
+        tmdb_id = first.get("id")
+        if not isinstance(tmdb_id, int):
+            return None
+        return tmdb_id
+
+    def refresh_tmdb_release_dates_for_library(self, movies: list[Movie]) -> tuple[int, int]:
+        if not self.should_use_tmdb(allow_when_omdb=True):
+            return 0, 0
+
+        checked = 0
+        updated = 0
+        candidates = 0
+
+        for movie in movies:
+            tmdb_id = self.resolve_tmdb_id_for_movie(movie)
+            if tmdb_id is None:
+                continue
+
+            candidates += 1
+
+            release_payload = self.fetch_tmdb_json(
+                f"/movie/{tmdb_id}/release_dates",
+                include_default_language=False,
+                allow_when_omdb=True,
+            )
+            if not isinstance(release_payload, dict):
+                continue
+
+            checked += 1
+            if checked % 50 == 0:
+                log(
+                    f"[{self.elapsed()}] TMDB release refresh progress: "
+                    f"checked={checked}, updated={updated}, candidates={candidates}"
+                )
+
+            physical_date, digital_date, tv_date, cinema_date = self.parse_tmdb_release_dates(
+                release_payload
+            )
+            selected_release_type, selected_release_date = self.tmdb_primary_release(
+                physical_date,
+                digital_date,
+                tv_date,
+            )
+            tmdb_text = self.tmdb_release_text(physical_date, digital_date, tv_date)
+
+            changed = False
+            if movie.tmdb_id != tmdb_id:
+                movie.tmdb_id = tmdb_id
+                changed = True
+
+            if selected_release_date and movie.physical_release_date != selected_release_date:
+                movie.physical_release_date = selected_release_date
+                movie.released = selected_release_date
+                movie.dvd_release_date = selected_release_date
+                movie.bluray_release_date = selected_release_date
+                changed = True
+
+            if selected_release_type and movie.release_type != selected_release_type:
+                movie.release_type = selected_release_type
+                changed = True
+
+            merged_text = self.merge_tmdb_release_text(movie.release_text, tmdb_text)
+            if merged_text != movie.release_text:
+                movie.release_text = merged_text
+                changed = True
+
+            if cinema_date and movie.cinema_release_date != cinema_date:
+                movie.cinema_release_date = cinema_date
+                changed = True
+
+            if changed:
+                updated += 1
+                movie.checked_at = datetime.now(timezone.utc).isoformat()
+                if movie.guide_rapide_id < self.TMDB_SYNTHETIC_ID_OFFSET:
+                    self.write_cached_movie(movie)
+
+        log(
+            f"[{self.elapsed()}] TMDB release-date refresh: checked={checked}, updated={updated}"
+        )
+        return checked, updated
 
     def discover_tmdb_physical_movies(self) -> list[Movie]:
         if not self.config.enable_tmdb_physical_discovery:
@@ -584,17 +718,11 @@ class SourceMixin:
                     date_to_iso,
                 )
 
-                selected_release_type = ""
-                selected_release_date = ""
-                if physical_date:
-                    selected_release_type = "physical"
-                    selected_release_date = physical_date
-                elif digital_date:
-                    selected_release_type = "digital"
-                    selected_release_date = digital_date
-                elif tv_date:
-                    selected_release_type = "tv"
-                    selected_release_date = tv_date
+                selected_release_type, selected_release_date = self.tmdb_primary_release(
+                    physical_date,
+                    digital_date,
+                    tv_date,
+                )
 
                 if not selected_release_date:
                     continue
@@ -626,14 +754,11 @@ class SourceMixin:
                 if not cinema_date and len(release_date) >= 10:
                     cinema_date = release_date[:10]
 
-                tmdb_release_chunks: list[str] = []
-                if physical_date:
-                    tmdb_release_chunks.append(f"Physical: {physical_date}")
-                if digital_date:
-                    tmdb_release_chunks.append(f"Digital: {digital_date}")
-                if tv_date:
-                    tmdb_release_chunks.append(f"TV: {tv_date}")
-                tmdb_release_text = " | ".join(tmdb_release_chunks) if tmdb_release_chunks else selected_release_date
+                tmdb_release_text = self.tmdb_release_text(
+                    physical_date,
+                    digital_date,
+                    tv_date,
+                )
 
                 movie = Movie(
                     id=self.canonical_movie_id(
@@ -665,7 +790,7 @@ class SourceMixin:
                     dvd_release_date=selected_release_date,
                     bluray_release_date=selected_release_date,
                     release_type=selected_release_type,
-                    release_text=f"TMDB FR releases: {tmdb_release_text}",
+                    release_text=tmdb_release_text,
                     released=selected_release_date,
                     physical_available=True,
                     checked_at=datetime.now(timezone.utc).isoformat(),

@@ -520,6 +520,54 @@ class BuildCatalogTests(unittest.TestCase):
         finally:
             builder.close()
 
+    def test_tmdb_release_refresh_updates_existing_movie_dates(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            tmdb_api_key="dummy-tmdb",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            movie = self.make_movie()
+            movie.tmdb_id = 999
+            movie.release_text = "DVD: 1 août 2026"
+            movie.cinema_release_date = ""
+
+            release_payload = {
+                "results": [
+                    {
+                        "iso_3166_1": "FR",
+                        "release_dates": [
+                            {"type": 4, "release_date": "2026-08-20T00:00:00.000Z"},
+                            {"type": 5, "release_date": "2026-08-25T00:00:00.000Z"},
+                            {"type": 6, "release_date": "2026-09-01T00:00:00.000Z"},
+                            {"type": 3, "release_date": "2026-05-11T00:00:00.000Z"},
+                        ],
+                    },
+                    {
+                        "iso_3166_1": "US",
+                        "release_dates": [
+                            {"type": 4, "release_date": "2026-08-10T00:00:00.000Z"},
+                            {"type": 5, "release_date": "2026-08-15T00:00:00.000Z"},
+                            {"type": 6, "release_date": "2026-08-18T00:00:00.000Z"},
+                        ],
+                    },
+                ]
+            }
+
+            with patch.object(builder, "fetch_tmdb_json", return_value=release_payload) as fetch_tmdb:
+                checked, updated = builder.refresh_tmdb_release_dates_for_library([movie])
+
+            self.assertEqual(checked, 1)
+            self.assertEqual(updated, 1)
+            self.assertEqual(movie.physical_release_date, "2026-08-10")
+            self.assertEqual(movie.released, "2026-08-10")
+            self.assertEqual(movie.release_type, "digital")
+            self.assertEqual(movie.cinema_release_date, "2026-05-11")
+            self.assertIn("TMDB releases", movie.release_text)
+            self.assertTrue(fetch_tmdb.called)
+        finally:
+            builder.close()
+
     def test_meta_includes_cinema_and_physical_release_fields(self) -> None:
         builder = build_catalog.GuideRapideBuilder()
         try:

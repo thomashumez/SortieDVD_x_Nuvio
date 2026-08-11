@@ -169,7 +169,19 @@ jobs:
           GR_GUIDE_RAPIDE_TIMEOUT: "30"
           GR_METADATA_API_DELAY_SECONDS: "0.1"
           GR_METADATA_API_TIMEOUT: "20"
-        run: python -u scripts/build_catalog.py
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u scripts/build_catalog.py 2>&1 | tee build.log
+
+          echo "::group::TMDB Progress Summary"
+          grep -E "TMDB (discovery|merge summary|release refresh progress|release-date refresh)" build.log || true
+          echo "::endgroup::"
+
+          {
+            echo "## TMDB Progress"
+            grep -E "TMDB (discovery|merge summary|release refresh progress|release-date refresh)" build.log || echo "No TMDB progress lines found."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save scraper cache
         if: always() && steps.nightly_gate.outputs.should_run == 'true' && inputs.wipe_cache != true

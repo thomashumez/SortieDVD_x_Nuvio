@@ -103,6 +103,7 @@ class GuideRapideBuilder(HttpMixin, MetadataMixin, SourceMixin, ParserMixin, Out
         )
         tmdb_movies = self.discover_tmdb_physical_movies()
         movies = self.merge_with_tmdb_movies(movies, tmdb_movies)
+        self.refresh_tmdb_release_dates_for_library(movies)
         if not discovered_urls and not movies:
             raise RuntimeError(
                 "Discovery returned no movie links and no cached movies are available; "
