@@ -378,6 +378,9 @@ class BuildCatalogTests(unittest.TestCase):
         )
         builder = build_catalog.GuideRapideBuilder(config=config)
         try:
+            builder.imdb_cache.pop("tt1234567", None)
+            builder.imdb_cache.pop(builder.unresolved_imdb_cache_key("tt1234567"), None)
+
             tmdb_meta = ImdbMetadata(
                 title="Title TMDb",
                 poster="https://image.tmdb.org/t/p/w780/from-tmdb.jpg",
@@ -420,6 +423,9 @@ class BuildCatalogTests(unittest.TestCase):
         )
         builder = build_catalog.GuideRapideBuilder(config=config)
         try:
+            builder.imdb_cache.pop("tt1234567", None)
+            builder.imdb_cache.pop(builder.unresolved_imdb_cache_key("tt1234567"), None)
+
             tmdb_meta = ImdbMetadata(
                 title="Title TMDb",
                 poster="",
