@@ -513,13 +513,15 @@ class SourceMixin:
         return physical, digital, tv, cinema
 
     def tmdb_primary_release(self, physical_date: str, digital_date: str, tv_date: str) -> tuple[str, str]:
-        if digital_date:
-            return "digital", digital_date
-        if physical_date:
-            return "physical", physical_date
-        if tv_date:
-            return "tv", tv_date
-        return "", ""
+        candidates = [
+            ("physical", physical_date),
+            ("digital", digital_date),
+            ("tv", tv_date),
+        ]
+        available = [(kind, day) for kind, day in candidates if day]
+        if not available:
+            return "", ""
+        return min(available, key=lambda item: item[1])
 
     def tmdb_release_text(self, physical_date: str, digital_date: str, tv_date: str) -> str:
         chunks: list[str] = []

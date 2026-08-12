@@ -574,6 +574,46 @@ class BuildCatalogTests(unittest.TestCase):
         finally:
             builder.close()
 
+    def test_tmdb_release_refresh_picks_lowest_date_across_types_4_5_6(self) -> None:
+        config = replace(
+            build_catalog.BuildConfig.from_env(),
+            tmdb_api_key="dummy-tmdb",
+        )
+        builder = build_catalog.GuideRapideBuilder(config=config)
+        try:
+            movie = self.make_movie()
+            movie.tmdb_id = 999
+
+            release_payload = {
+                "results": [
+                    {
+                        "iso_3166_1": "FR",
+                        "release_dates": [
+                            {"type": 4, "release_date": "2026-08-20T00:00:00.000Z"},
+                            {"type": 5, "release_date": "2026-08-05T00:00:00.000Z"},
+                            {"type": 6, "release_date": "2026-08-12T00:00:00.000Z"},
+                        ],
+                    },
+                    {
+                        "iso_3166_1": "US",
+                        "release_dates": [
+                            {"type": 4, "release_date": "2026-08-10T00:00:00.000Z"},
+                        ],
+                    },
+                ]
+            }
+
+            with patch.object(builder, "fetch_tmdb_json", return_value=release_payload):
+                checked, updated = builder.refresh_tmdb_release_dates_for_library([movie])
+
+            self.assertEqual(checked, 1)
+            self.assertEqual(updated, 1)
+            self.assertEqual(movie.physical_release_date, "2026-08-05")
+            self.assertEqual(movie.released, "2026-08-05")
+            self.assertEqual(movie.release_type, "physical")
+        finally:
+            builder.close()
+
     def test_tmdb_release_refresh_incremental_checks_only_upcoming_or_missing_dates(self) -> None:
         config = replace(
             build_catalog.BuildConfig.from_env(),
