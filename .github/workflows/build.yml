@@ -212,3 +212,34 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  keepalive:
+    # Scheduled runs do not count as repository activity, so GitHub disables the
+    # cron after 60 days of no commits. An empty commit resets that timer.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Push empty commit if repository looks inactive
+        shell: bash
+        run: |
+          set -euo pipefail
+          last_commit_epoch="$(git log -1 --format=%ct)"
+          age_days=$(( ( $(date +%s) - last_commit_epoch ) / 86400 ))
+          echo "Last commit is ${age_days} day(s) old."
+          if (( age_days < 45 )); then
+            echo "Recent activity detected, no keepalive commit needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive to prevent scheduled workflow from being disabled"
+          git push origin main
